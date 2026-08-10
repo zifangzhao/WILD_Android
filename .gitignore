@@ -1,0 +1,24 @@
+*.iml
+.gradle/
+/local.properties
+/.idea/
+/captures/
+/build/
+/app/build/
+
+# Local Gradle homes used for isolated builds.
+/.gradle-user/
+/.gradle-user-*/
+
+# Root-level device-test captures and packages. Do not ignore resource XML below app/.
+/*.png
+/*.xml
+/*.log
+/*.apk
+/*logcat.txt
+/.codex-write-test.txt
+/tmp/
+
+# Local source snapshots, not application source.
+*.testcopy
+*.codex_work*

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="wild_bg">#FFF7EF</color>
+    <color name="wild_surface">#FFFDF8</color>
+    <color name="wild_surface_alt">#FFF1DE</color>
+    <color name="wild_ink">#1E242B</color>
+    <color name="wild_muted">#5E6873</color>
+    <color name="wild_line">#E9DAC2</color>
+    <color name="wild_accent">#F59E0B</color>
+    <color name="wild_accent_deep">#D97706</color>
+    <color name="wild_alert">#D64545</color>
+    <color name="wild_ok">#1C8A57</color>
+</resources>
