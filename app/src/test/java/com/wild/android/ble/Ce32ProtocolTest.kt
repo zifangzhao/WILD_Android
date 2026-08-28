@@ -72,8 +72,94 @@ class Ce32ProtocolTest {
         assertContentEquals(byteArrayOf(0x3C, 0xAB.toByte(), 0xBA.toByte(), 0x3E), Ce32Protocol.buildSoftwareReset())
         assertContentEquals(byteArrayOf(0x3C, 0xAC.toByte(), 0xCA.toByte(), 0x3E), Ce32Protocol.buildSystemBootloader())
         assertContentEquals(byteArrayOf(0x3C, 0xAE.toByte(), 0x3E), Ce32Protocol.buildFirmwareImageUpdate())
+        assertContentEquals(
+            byteArrayOf(0x3C, 0x96.toByte(), 0x00, 0x00, 0x10, 0x00, 0x00, 0x3E),
+            Ce32Protocol.buildAiModuleInstall(Ce32Protocol.AiModuleEphysSlot),
+        )
+        assertContentEquals(
+            byteArrayOf(0x3C, 0x96.toByte(), 0x01, 0x00, 0x12, 0x00, 0x00, 0x3E),
+            Ce32Protocol.buildAiModuleInstall(Ce32Protocol.AiModuleImuSlot),
+        )
+        assertContentEquals(byteArrayOf(0x3C, 0x97.toByte(), 0x00, 0x3E), Ce32Protocol.buildAiModuleSelect(0))
+        assertContentEquals(byteArrayOf(0x3C, 0x97.toByte(), 0xFF.toByte(), 0x3E), Ce32Protocol.buildAiModuleSelect(null))
+        assertContentEquals(byteArrayOf(0x3C, 0x98.toByte(), 0x01, 0x3E), Ce32Protocol.buildAiRuntimeEnable(true))
+        assertContentEquals(byteArrayOf(0x3C, 0x98.toByte(), 0x00, 0x3E), Ce32Protocol.buildAiRuntimeEnable(false))
+        assertContentEquals(byteArrayOf(0x3C, 0x99.toByte(), 0x3E), Ce32Protocol.buildAiRuntimeStatusRequest())
+        assertContentEquals(byteArrayOf(0x3C, 0x9B.toByte(), 0xFF.toByte(), 0x3E), Ce32Protocol.buildAiResidentStatusRequest())
+        assertContentEquals(byteArrayOf(0x3C, 0x9B.toByte(), 0x01, 0x3E), Ce32Protocol.buildAiResidentStatusRequest(1))
         assertContentEquals(byteArrayOf(0x3C, 0x94.toByte(), 0x34, 0x12, 0x3E), Ce32Protocol.buildLogBlockRequest(0x1234))
         assertContentEquals(byteArrayOf(0x3C, 0x95.toByte(), 0x07, 0x3E), Ce32Protocol.buildDeleteRecords(7))
+    }
+
+    @Test
+    fun peripheralAndTriggerControlCommandsKeepTheirWireFormat() {
+        assertContentEquals(
+            byteArrayOf(0x3C, 0x15, 0x34, 0x12, 0xCD.toByte(), 0xAB.toByte(), 0x3E),
+            Ce32Protocol.buildCameraParamUpdate(reg0 = 0x1234, reg1 = 0xABCD),
+        )
+        assertContentEquals(
+            byteArrayOf(0x3C, 0x15, 0x02, 0x00, 0x00, 0xA0.toByte(), 0x3F, 0x3E),
+            Ce32Protocol.buildTriggerGainUpdate(channelId = 2, gain = 1.25f),
+        )
+        assertContentEquals(byteArrayOf(0x3C, 0x9E.toByte(), 0x00, 0x3E), Ce32Protocol.buildSnapshotRequest())
+        assertContentEquals(byteArrayOf(0x3C, 0x9E.toByte(), 0x01, 0x3E), Ce32Protocol.buildSnapshotRequest(preview = true))
+        assertContentEquals(byteArrayOf(0x3C, 0x9D.toByte(), 0x3E), Ce32Protocol.buildReadCameraParams())
+        assertContentEquals(byteArrayOf(0x3C, 0x11, 0x01, 0x3E), Ce32Protocol.buildStimEnable(true))
+        assertContentEquals(byteArrayOf(0x3C, 0x11, 0x00, 0x3E), Ce32Protocol.buildStimEnable(false))
+        assertContentEquals(
+            byteArrayOf(0x3C, 0x13, 0xFF.toByte(), 0x7F, 0x01, 0x3E),
+            Ce32Protocol.buildStimIntensity(channelId = 1, intensityPercent = 50f),
+        )
+        assertContentEquals(
+            byteArrayOf(0x3C, 0x14, 0x02, 0x00, 0x00, 0x20, 0x40, 0x3E),
+            Ce32Protocol.buildTriggerThreshold(channelId = 2, threshold = 2.5f),
+        )
+        assertContentEquals(byteArrayOf(0x3C, 0x60, 0x08, 0x3E), Ce32Protocol.buildForceTrigger(3))
+        assertContentEquals(byteArrayOf(0x3C, 0x61, 0x00, 0x0A, 0x3E), Ce32Protocol.buildLedCommand(true))
+        assertContentEquals(byteArrayOf(0x3C, 0x61, 0x02, 0x0A, 0x3E), Ce32Protocol.buildGpio0Command(GpioMode.High))
+        assertContentEquals(byteArrayOf(0x3C, 0x61, 0x03, 0x01, 0x3E), Ce32Protocol.buildGpio1Command(GpioMode.Input))
+        assertContentEquals(byteArrayOf(0x3C, 0x51, 0x3E), Ce32Protocol.buildImpedanceTest())
+        assertContentEquals(byteArrayOf(0x3C, 0x43, 0x83.toByte(), 0x3E), Ce32Protocol.buildTriggerWaveform(true))
+        assertContentEquals(byteArrayOf(0x3C, 0x43, 0x00, 0x3E), Ce32Protocol.buildTriggerWaveform(false))
+    }
+
+    @Test
+    fun parsesCe64ResidentAiStatusPackets() {
+        val runtimePayload = ByteBuffer.allocate(26).order(ByteOrder.LITTLE_ENDIAN)
+            .put(0x1F.toByte())
+            .put(Ce32Protocol.AiModuleImuSlot.toByte())
+            .putInt(-7)
+            .putInt(0x2000B480)
+            .putInt(0x0003C000)
+            .putInt(256)
+            .putInt(64)
+            .putInt(1234)
+            .array()
+        val runtime = assertNotNull(Ce32Protocol.parseAiRuntimeStatus(runtimePayload))
+        assertTrue(runtime.layoutReady)
+        assertTrue(runtime.running)
+        assertEquals(Ce32Protocol.AiModuleImuSlot, runtime.activeSlot)
+        assertEquals(-7, runtime.statusCode)
+        assertEquals(0x2000B480L, runtime.runtimeWindowAddress)
+        assertEquals(1234L, runtime.executionTime)
+
+        val slotPayload = ByteBuffer.allocate(34).order(ByteOrder.LITTLE_ENDIAN)
+            .put(Ce32Protocol.AiModuleEphysSlot.toByte())
+            .put(1)
+            .putInt(0)
+            .putInt(0x08100000)
+            .putInt(0x00080000)
+            .putInt(4096)
+            .putInt(0x100)
+            .putInt(0x2000B480)
+            .putInt(1024)
+            .putInt(256)
+            .array()
+        val slot = assertNotNull(Ce32Protocol.parseAiResidentSlotStatus(slotPayload))
+        assertTrue(slot.present)
+        assertEquals(Ce32Protocol.AiModuleEphysSlot, slot.slot)
+        assertEquals(4096L, slot.imageSizeBytes)
+        assertEquals(1024L, slot.requiredArenaBytes)
     }
 
     @Test
@@ -139,6 +225,46 @@ class Ce32ProtocolTest {
     }
 
     @Test
+    fun parseRecordingTelemetryAndStartEventsRejectMalformedDates() {
+        val telemetryPayload = ByteArray(10)
+        putU32(telemetryPayload, 0, 3_600)
+        putU16(telemetryPayload, 4, 0x8000)
+        putU32(telemetryPayload, 6, 2_048)
+
+        val telemetry = Ce32Protocol.parseRecTimePacket(telemetryPayload)
+        assertNotNull(telemetry)
+        assertEquals(3_600L, telemetry.recordingSeconds)
+        assertTrue(assertNotNull(telemetry.voltage) > 6.5)
+        assertEquals(1.0, assertNotNull(telemetry.usedSpaceMb), 1e-9)
+
+        val startPayload = ByteArray(25).apply {
+            this[1] = 7
+            this[2] = 14
+            this[3] = 26
+            this[4] = 12
+            this[5] = 34
+            this[6] = 56
+            this[24] = 3
+        }
+        val start = Ce32Protocol.parseRecordStartEvent(startPayload)
+        assertNotNull(start)
+        assertEquals(2026, start.year)
+        assertEquals(7, start.month)
+        assertEquals(14, start.day)
+        assertEquals(12, start.hour)
+        assertEquals(34, start.minute)
+        assertEquals(56, start.second)
+        assertEquals(3, start.eventCode)
+
+        startPayload[1] = 0
+        val malformed = Ce32Protocol.parseRecordStartEvent(startPayload)
+        assertNotNull(malformed)
+        assertNull(malformed.year)
+        assertNull(malformed.month)
+        assertEquals(3, malformed.eventCode)
+    }
+
+    @Test
     fun parseSyncStatusHandlesFullSyncMetricPacket() {
         val payload = ByteBuffer.allocate(15).order(ByteOrder.LITTLE_ENDIAN)
             .put(0x01)
@@ -160,6 +286,30 @@ class Ce32ProtocolTest {
     }
 
     @Test
+    fun packedLiveSyncTimePreservesDeviceClockAndRequestedDelay() {
+        val hostTime = fixedTime(minute = 1, second = 2, millis = 345)
+        val outbound = Ce32Protocol.buildPackedTimeMeasurement(delayMs = 250, now = hostTime)
+        assertEquals(0x8F, outbound[1].toInt() and 0xFF)
+        assertEquals(7, outbound.size)
+
+        val packed = ByteBuffer.wrap(outbound, 2, 4).order(ByteOrder.LITTLE_ENDIAN).int
+        val expectedClockMs = (hostTime.toLocalTime().toNanoOfDay() / 1_000_000L).toInt() and 0xFFFFF
+        assertEquals(expectedClockMs, packed and 0xFFFFF)
+        assertEquals(250, packed ushr 20)
+
+        val inbound = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN)
+            .putInt(123_456 or (375 shl 20))
+            .array()
+        val sync = Ce32Protocol.parseSyncStatus(inbound)
+        assertNotNull(sync)
+        assertEquals(0x03, sync.mode)
+        assertEquals(123.456f, sync.offsetSeconds)
+        assertEquals(0.375f, sync.delaySeconds)
+        assertEquals(0, sync.sampleCount)
+        assertNotNull(sync.hostRxSeconds)
+    }
+
+    @Test
     fun parseCameraRowRejectsOutOfRangeRowsAndDecodesPreviewRows() {
         val goodPayload = byteArrayOf(3) + ByteArray(Ce32Protocol.CameraPreviewPixels) { index -> index.toByte() }
         val goodRow = Ce32Protocol.parseCameraRow(Ce32Protocol.CameraPreviewCommand, goodPayload)
@@ -177,6 +327,45 @@ class Ce32ProtocolTest {
     }
 
     @Test
+    fun parseCameraStimAndDeleteReadbacksKeepTheirFieldsSeparated() {
+        val camera = Ce32Protocol.parseCameraParams(
+            byteArrayOf(0x34, 0x12, 0xCD.toByte(), 0xAB.toByte()),
+        )
+        assertNotNull(camera)
+        assertEquals(0x1234, camera.reg0)
+        assertEquals(0xABCD, camera.reg1)
+
+        val stimPayload = ByteArray(60)
+        putU32(stimPayload, 0, 101)
+        putU32(stimPayload, 4, 102)
+        putU32(stimPayload, 8, 103)
+        putU32(stimPayload, 12, 104)
+        putU32(stimPayload, 16, 105)
+        ByteBuffer.wrap(stimPayload, 20, 4).order(ByteOrder.LITTLE_ENDIAN).putFloat(1.25f)
+        ByteBuffer.wrap(stimPayload, 24, 4).order(ByteOrder.LITTLE_ENDIAN).putFloat(2.5f)
+        ByteBuffer.wrap(stimPayload, 28, 4).order(ByteOrder.LITTLE_ENDIAN).putFloat(3.75f)
+        putU32(stimPayload, 32, 106)
+        putU32(stimPayload, 36, 107)
+        putU32(stimPayload, 40, 108)
+        putU32(stimPayload, 44, 109)
+        putU32(stimPayload, 48, 110)
+        putU32(stimPayload, 52, 111)
+        putU32(stimPayload, 56, 7)
+
+        val stim = Ce32Protocol.parseStimControl(stimPayload)
+        assertNotNull(stim)
+        assertEquals(7, stim.id)
+        assertEquals(101, stim.triggerDelayThis)
+        assertEquals(2.5f, stim.triggerGain)
+        assertEquals(3.75f, stim.triggerMean)
+        assertEquals(108, stim.triggerState)
+        assertEquals(110, stim.stimCount)
+        assertEquals(111, stim.count)
+
+        assertEquals(0x12345678L, Ce32Protocol.parseDeleteAck(byteArrayOf(0x78, 0x56, 0x34, 0x12)))
+    }
+
+    @Test
     fun parseShortListsKeepUnsignedMagnitudeAndSignedPhaseSeparate() {
         val magnitudePayload = byteArrayOf(0x34, 0x12, 0xFF.toByte(), 0x7F)
         val phasePayload = byteArrayOf(0x34, 0x12, 0x00, 0x80.toByte(), 0xFF.toByte(), 0xFF.toByte())
@@ -191,8 +380,18 @@ class Ce32ProtocolTest {
     @Test
     fun payloadLengthAndVersionHelpersMatchCurrentAssumptions() {
         assertEquals(24, Ce32Protocol.payloadLengthFor(0x8D))
-        assertEquals(2, Ce32Protocol.payloadLengthFor(0xB0))
-        assertEquals(2, Ce32Protocol.payloadLengthFor(0xB1))
+        assertEquals(16, Ce32Protocol.payloadLengthFor(0xB0))
+        assertEquals(15, Ce32Protocol.payloadLengthFor(0xB1))
+        assertEquals(84, Ce32Protocol.payloadLengthFor(0xB2))
+        assertEquals(3, Ce32Protocol.payloadLengthFor(0xB3))
+        assertEquals(16, Ce32Protocol.payloadLengthFor(Ce64BleOtaProtocol.CommandBegin))
+        assertEquals(16, Ce32Protocol.payloadLengthFor(Ce64BleOtaProtocol.CommandWrite))
+        assertEquals(16, Ce32Protocol.payloadLengthFor(Ce64BleOtaProtocol.CommandFinish))
+        assertEquals(16, Ce32Protocol.payloadLengthFor(Ce64BleOtaProtocol.CommandStatus))
+        assertEquals(16, Ce32Protocol.payloadLengthFor(Ce64BleOtaProtocol.CommandInstall))
+        assertEquals(512, Ce32Protocol.payloadLengthFor(0x9C))
+        assertEquals(14, Ce32Protocol.payloadLengthFor(0x9A))
+        assertEquals(32, Ce32Protocol.payloadLengthFor(Ce32Protocol.SchedulerEventDiagnostic))
         assertEquals(1, Ce32Protocol.payloadLengthFor(0xC0))
         assertEquals(0, Ce32Protocol.payloadLengthFor(0x40))
         assertEquals(0, Ce32Protocol.payloadLengthFor(0x41))
@@ -209,6 +408,106 @@ class Ce32ProtocolTest {
         assertTrue(Ce32Protocol.matchesKnownNamePrefix("WILD_node"))
         assertTrue(Ce32Protocol.matchesKnownNamePrefix("XENP_probe"))
         assertFalse(Ce32Protocol.matchesKnownNamePrefix("mystery-ble"))
+    }
+
+    @Test
+    fun spikeAndSpectrumBuildersMatchCe64WireLayouts() {
+        val spike = SpikeDetectorConfigUiState(
+            enabled = true,
+            channelEnableMask = 0x11L,
+            positivePolarityMask = 0x10L,
+            thresholds = List(64) { if (it == 4) 321 else 120 },
+            confirmationTag = 7,
+        )
+        val spikeCommand = Ce32Protocol.buildSpikeDetectorConfig(spike)
+
+        assertEquals(515, spikeCommand.size)
+        assertEquals(0x24, spikeCommand[1].toInt() and 0xFF)
+        assertEquals(0x3E, spikeCommand.last().toInt() and 0xFF)
+        val decoded = assertNotNull(Ce32Protocol.parseSpikeDetectorConfig(spikeCommand.copyOfRange(2, 514)))
+        assertTrue(decoded.enabled)
+        assertTrue(decoded.channelEnabled(0))
+        assertTrue(decoded.channelEnabled(4))
+        assertTrue(decoded.positivePolarity(4))
+        assertEquals(321, decoded.thresholds[4])
+        assertEquals(7, decoded.confirmationTag)
+
+        val spectrum = Ce32Protocol.buildSpectrumConfig(
+            SpectrumConfigUiState(
+                enabled = true,
+                dwtProfileEnabled = true,
+                source = Ce32Protocol.SpectrumSourceEphys,
+                channel = 31,
+                firstBin = 1,
+                lastBin = 63,
+                periodMs = 200,
+            ),
+        )
+        assertContentEquals(
+            byteArrayOf(0x3C, 0x25, 0x04, 0x03, 0x10, 0x01, 0x1F, 0x01, 0x00, 0x3F, 0x00, 0xC8.toByte(), 0x00, 0x3E),
+            spectrum,
+        )
+    }
+
+    @Test
+    fun schedulerRuleBuilderAndStatusParserMatchVersionTwoLayout() {
+        val rule = SchedulerRuleUiState(
+            id = 2,
+            enabled = true,
+            trigger = 0,
+            action = 0,
+            profileId = 0xFF,
+            timeOfDaySeconds = 36_000,
+            durationSeconds = 1_800,
+            evaluationSeconds = 60,
+            debounceCount = 1,
+            maxDeferrals = 1,
+        )
+        val command = Ce32Protocol.buildSchedulerRuleUpdate(rule)
+        assertEquals(51, command.size)
+        assertEquals(Ce32Protocol.SchedulerCommandSetRule, command[1].toInt() and 0xFF)
+        assertEquals(2, command[2].toInt() and 0xFF)
+        assertEquals(1, command[3].toInt() and 0xFF)
+        assertEquals(0xA0, command[16].toInt() and 0xFF) // 36,000 LE at rule offset 14
+        assertEquals(0x8C, command[17].toInt() and 0xFF)
+
+        val status = ByteBuffer.allocate(32).order(ByteOrder.LITTLE_ENDIAN)
+            .put(2)
+            .put(1)
+            .put(1)
+            .put(0)
+            .putInt(9)
+            .putInt(1234)
+            .put(3)
+            .put(0)
+            .put(1)
+            .put(0xFF.toByte())
+            .putInt(100)
+            .putInt(2)
+            .putInt(3)
+            .putInt(4)
+            .array()
+        val decoded = assertNotNull(Ce32Protocol.parseSchedulerStatus(status))
+        assertTrue(decoded.enabled)
+        assertTrue(decoded.clockValid)
+        assertEquals(9, decoded.generation)
+        assertEquals(1234, decoded.nextWakeSeconds)
+        assertEquals(3, decoded.lastRuleId)
+        assertEquals(4, decoded.conflictCount)
+    }
+
+    @Test
+    fun sharedServiceWithoutAWildIdentityIsNotEligibleForConnection() {
+        val sharedServiceOnly = DeviceSessionUiState(
+            id = "test-device",
+            name = "sps",
+            address = "AA:BB:CC:DD:EE:FF",
+            traceColorArgb = 0xFF1687F2.toInt(),
+            advertisedServiceMatch = true,
+        )
+
+        assertFalse(sharedServiceOnly.bulkConnectEligible)
+        assertTrue(sharedServiceOnly.copy(namePrefixMatch = true).bulkConnectEligible)
     }
 
     @Test
@@ -313,23 +612,23 @@ class Ce32ProtocolTest {
     }
 
     @Test
-    fun buildDspLiveUpdateMatchesWindowsCommandIdsForBothPipelines() {
+    fun buildDspLiveUpdateCarriesAllFourChannelsForBothPipelines() {
         val dsp0 = Ce32Protocol.buildDspLiveUpdate(
             dspIndex = 0,
             maOrder = 11,
             filterType = 12,
             formula = 13,
-            channels = listOf(21, 22, 23),
+            channels = listOf(21, 22, 23, 24),
         )
         val dsp1 = Ce32Protocol.buildDspLiveUpdate(
             dspIndex = 1,
             maOrder = 11,
             filterType = 12,
             formula = 13,
-            channels = listOf(21, 22, 23),
+            channels = listOf(21, 22, 23, 24),
         )
 
-        assertEquals(27, dsp0.size)
+        assertEquals(31, dsp0.size)
         assertEquals(0x22, dsp0[1].toInt() and 0xFF)
         assertEquals(11, littleEndianInt(dsp0, 2))
         assertEquals(12, littleEndianInt(dsp0, 6))
@@ -337,9 +636,10 @@ class Ce32ProtocolTest {
         assertEquals(21, littleEndianInt(dsp0, 14))
         assertEquals(22, littleEndianInt(dsp0, 18))
         assertEquals(23, littleEndianInt(dsp0, 22))
+        assertEquals(24, littleEndianInt(dsp0, 26))
         assertEquals(0x3E, dsp0.last().toInt() and 0xFF)
 
-        assertEquals(27, dsp1.size)
+        assertEquals(31, dsp1.size)
         assertEquals(0x23, dsp1[1].toInt() and 0xFF)
         assertEquals(11, littleEndianInt(dsp1, 2))
         assertEquals(12, littleEndianInt(dsp1, 6))
@@ -347,6 +647,7 @@ class Ce32ProtocolTest {
         assertEquals(21, littleEndianInt(dsp1, 14))
         assertEquals(22, littleEndianInt(dsp1, 18))
         assertEquals(23, littleEndianInt(dsp1, 22))
+        assertEquals(24, littleEndianInt(dsp1, 26))
         assertEquals(0x3E, dsp1.last().toInt() and 0xFF)
     }
 

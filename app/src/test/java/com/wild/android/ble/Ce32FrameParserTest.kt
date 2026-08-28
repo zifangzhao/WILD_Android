@@ -149,6 +149,43 @@ class Ce32FrameParserTest {
         assertContentEquals(byteArrayOf(), frames.single().second)
     }
 
+    @Test
+    fun parserEmitsRawCe64AiRuntimeStatusAcrossChunks() {
+        val frames = mutableListOf<Pair<Int, ByteArray>>()
+        val parser = Ce32FrameParser { commandId, payload ->
+            frames += commandId to payload
+        }
+        val payload = ByteArray(26) { index -> (index + 1).toByte() }
+
+        parser.push(byteArrayOf(0xAD.toByte(), 0x99.toByte()))
+        parser.push(payload.copyOfRange(0, 9))
+        parser.push(payload.copyOfRange(9, payload.size))
+
+        assertEquals(1, frames.size)
+        assertEquals(0x99, frames.single().first)
+        assertContentEquals(payload, frames.single().second)
+    }
+
+    @Test
+    fun parserUsesSessionResolverForVariableLengthSchedulerReplies() {
+        val frames = mutableListOf<Pair<Int, ByteArray>>()
+        val payload = ByteArray(33) { it.toByte() }
+        val parser = Ce32FrameParser(
+            payloadLengthResolver = { commandId ->
+                if (commandId == Ce32Protocol.SchedulerResponse) 33 else null
+            },
+            onFrame = { commandId, received -> frames += commandId to received },
+        )
+
+        parser.push(byteArrayOf(0xAD.toByte(), Ce32Protocol.SchedulerResponse.toByte()))
+        parser.push(payload.copyOfRange(0, 7))
+        parser.push(payload.copyOfRange(7, payload.size))
+
+        assertEquals(1, frames.size)
+        assertEquals(Ce32Protocol.SchedulerResponse, frames.single().first)
+        assertContentEquals(payload, frames.single().second)
+    }
+
     private fun assertTrueAllPayloadsEmpty(frames: List<Pair<Int, ByteArray>>) {
         frames.forEach { (_, payload) ->
             assertContentEquals(byteArrayOf(), payload)

@@ -1,16 +1,20 @@
 package com.wild.android
 
 import android.app.Application
+import android.net.Uri
+import android.provider.OpenableColumns
 import android.content.pm.ApplicationInfo
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.wild.android.ble.BleHostSessionState
 import com.wild.android.ble.Ce32BleManager
+import com.wild.android.ble.Ce64BleOtaPackage
 import com.wild.android.ble.ControlScope
 import com.wild.android.ble.DeviceSessionUiState
 import com.wild.android.ble.GpioMode
 import com.wild.android.ble.PreviewSelection
+import com.wild.android.cloud.CloudFleetGatewayState
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -20,16 +24,19 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import java.util.Locale
+import java.io.ByteArrayOutputStream
 
 data class WildUiState(
     val sessions: List<DeviceSessionUiState> = emptyList(),
     val activeSessionId: String? = null,
     val isScanning: Boolean = false,
     val statusBanner: String = "",
+    val cloudFleet: CloudFleetGatewayState = CloudFleetGatewayState(),
     val fleetConnectActive: Boolean = false,
     val fleetConnectPendingCount: Int = 0,
     val controlScope: ControlScope = ControlScope.ActiveDevice,
     val selectedSessionIds: Set<String> = emptySet(),
+    val markedSessionIds: Set<String> = emptySet(),
     val pendingConnectionIds: List<String> = emptyList(),
     val autoImpedanceRunning: Boolean = false,
     val autoImpedanceDeviceId: String? = null,
@@ -169,12 +176,10 @@ internal fun resolveScopeAfterSelectionChange(
     sessions: List<DeviceSessionUiState>,
     selectedIds: Set<String>,
 ): ControlScope {
-    val hasConnectedSelection = sessions.any { session ->
-        session.isConnected && session.id in selectedIds
-    }
     return when {
-        hasConnectedSelection -> ControlScope.SelectedDevices
-        previousScope == ControlScope.SelectedDevices -> ControlScope.ActiveDevice
+        previousScope == ControlScope.SelectedDevices &&
+            sessions.none { session -> session.isConnected && session.id in selectedIds } ->
+            ControlScope.ActiveDevice
         else -> previousScope
     }
 }
@@ -189,12 +194,89 @@ internal fun mergeSelectedIdsForConnectBatch(
     }
 }
 
+internal fun resolveQueueableMarkedIds(state: WildUiState): List<String> {
+    val sessionsById = state.sessions.associateBy { it.id }
+    return state.markedSessionIds.mapNotNull { id ->
+        sessionsById[id]?.takeIf { session ->
+            !session.isConnected && !session.isLinkingLike
+        }?.id
+    }
+}
+
+internal fun removeIdsPreservingOrder(
+    source: Set<String>,
+    idsToRemove: Iterable<String>,
+): LinkedHashSet<String> {
+    val removalSet = idsToRemove.toHashSet()
+    return source.filterNot { id -> id in removalSet }.toCollection(linkedSetOf())
+}
+
+internal enum class DeviceRosterPane {
+    Connected,
+    Linking,
+    Verified,
+    Nearby,
+}
+
+internal data class DeviceRosterBuckets(
+    val connected: List<DeviceSessionUiState>,
+    val linking: List<DeviceSessionUiState>,
+    val verified: List<DeviceSessionUiState>,
+    val nearby: List<DeviceSessionUiState>,
+)
+
+internal fun buildDeviceRosterBuckets(state: WildUiState): DeviceRosterBuckets {
+    val connected = mutableListOf<DeviceSessionUiState>()
+    val linking = mutableListOf<DeviceSessionUiState>()
+    val verified = mutableListOf<DeviceSessionUiState>()
+    val nearby = mutableListOf<DeviceSessionUiState>()
+
+    state.sessions.forEach { session ->
+        when {
+            session.isConnected -> connected += session
+            session.isLinkingLike -> linking += session
+            session.bulkConnectEligible -> verified += session
+            else -> nearby += session
+        }
+    }
+
+    return DeviceRosterBuckets(
+        connected = connected,
+        linking = linking,
+        verified = verified,
+        nearby = nearby,
+    )
+}
+
+internal fun normalizeDeviceRosterPane(
+    requestedPane: DeviceRosterPane,
+    buckets: DeviceRosterBuckets,
+): DeviceRosterPane {
+    val requestedHasSessions = when (requestedPane) {
+        DeviceRosterPane.Connected -> buckets.connected.isNotEmpty()
+        DeviceRosterPane.Linking -> buckets.linking.isNotEmpty()
+        DeviceRosterPane.Verified -> buckets.verified.isNotEmpty()
+        DeviceRosterPane.Nearby -> buckets.nearby.isNotEmpty()
+    }
+    if (requestedHasSessions) {
+        return requestedPane
+    }
+
+    return when {
+        buckets.connected.isNotEmpty() -> DeviceRosterPane.Connected
+        buckets.linking.isNotEmpty() -> DeviceRosterPane.Linking
+        buckets.verified.isNotEmpty() -> DeviceRosterPane.Verified
+        else -> DeviceRosterPane.Nearby
+    }
+}
+
 private data class ShellState(
     val activeSessionId: String?,
     val isScanning: Boolean,
     val statusBanner: String,
     val fleetConnectActive: Boolean,
     val fleetConnectPendingCount: Int,
+    val cloudFleet: CloudFleetGatewayState,
 )
 
 private data class AutoImpedanceState(
@@ -221,6 +303,7 @@ class WildViewModel(
     application: Application,
 ) : AndroidViewModel(application) {
     private val bleManager = (application as WildApplication).bleManager
+    private val cloudFleetGateway = (application as WildApplication).cloudFleetGateway
     private val controlScope = MutableStateFlow(ControlScope.ActiveDevice)
     private val selectedSessionIds = MutableStateFlow<Set<String>>(emptySet())
     private val pendingConnectionIds = MutableStateFlow<List<String>>(emptyList())
@@ -246,7 +329,8 @@ class WildViewModel(
         bleManager.isScanning,
         bleManager.statusBanner,
         fleetConnectState,
-    ) { activeId, isScanning, banner, fleetConnectState ->
+        cloudFleetGateway.state,
+    ) { activeId, isScanning, banner, fleetConnectState, cloudFleet ->
         val (fleetConnectActive, fleetConnectPendingCount) = fleetConnectState
         ShellState(
             activeSessionId = activeId,
@@ -254,6 +338,7 @@ class WildViewModel(
             statusBanner = banner,
             fleetConnectActive = fleetConnectActive,
             fleetConnectPendingCount = fleetConnectPendingCount,
+            cloudFleet = cloudFleet,
         )
     }
 
@@ -284,6 +369,7 @@ class WildViewModel(
             activeSessionId = shellState.activeSessionId,
             isScanning = shellState.isScanning,
             statusBanner = shellState.statusBanner,
+            cloudFleet = shellState.cloudFleet,
             fleetConnectActive = shellState.fleetConnectActive,
             fleetConnectPendingCount = shellState.fleetConnectPendingCount,
             controlScope = controlTarget.scope,
@@ -306,6 +392,22 @@ class WildViewModel(
 
     fun clearBanner() {
         bleManager.clearBanner()
+    }
+
+    fun signInToCloudFleet(email: String, password: String) {
+        cloudFleetGateway.signIn(email, password)
+    }
+
+    fun createCloudFleetAccount(email: String, password: String) {
+        cloudFleetGateway.createSharedAccount(email, password)
+    }
+
+    fun signOutOfCloudFleet() {
+        cloudFleetGateway.signOutOfSharedFleet()
+    }
+
+    fun setCloudFleetViewVisible(visible: Boolean) {
+        cloudFleetGateway.setRemoteFleetViewVisible(visible)
     }
 
     fun setRecordArmEnabled(enabled: Boolean) {
@@ -368,6 +470,15 @@ class WildViewModel(
 
     fun clearRssiHistory() {
         bleManager.clearRssiHistory()
+    }
+
+    fun clearStaleDevices() {
+        bleManager.clearStaleDiscoverySessions()
+    }
+
+    fun shutdownForAppExit() {
+        recordingArmState.value = RecordingArmState()
+        bleManager.shutdownForAppExit()
     }
 
     fun runDebugCommand(command: String) {
@@ -665,9 +776,8 @@ class WildViewModel(
     }
 
     fun disconnectAllConnected() {
-        uiState.value.connectedSessions.forEach { session ->
-            bleManager.disconnect(session.id)
-        }
+        pendingConnectionIds.value = emptyList()
+        bleManager.disconnectAll()
     }
 
     fun setActiveSession(deviceId: String) {
@@ -1262,6 +1372,96 @@ class WildViewModel(
         }
     }
 
+    fun refreshSignalAnalysis() {
+        val targetIds = resolveConnectedControlTargetIds(uiState.value)
+        if (targetIds.isEmpty()) {
+            return
+        }
+        viewModelScope.launch {
+            bleManager.requestSpikeDetectorConfig(targetIds)
+            bleManager.requestSpectrumConfig(targetIds)
+            bleManager.requestSchedulerStatus(targetIds)
+            bleManager.requestSchedulerConfig(targetIds)
+        }
+    }
+
+    fun setSpikeDetectorConfig(config: com.wild.android.ble.SpikeDetectorConfigUiState) {
+        val targetIds = resolveConnectedControlTargetIds(uiState.value)
+        if (targetIds.isEmpty()) {
+            return
+        }
+        viewModelScope.launch {
+            bleManager.setSpikeDetectorConfig(targetIds, config)
+        }
+    }
+
+    fun setSpectrumConfig(config: com.wild.android.ble.SpectrumConfigUiState) {
+        val targetIds = resolveConnectedControlTargetIds(uiState.value)
+        if (targetIds.isEmpty()) {
+            return
+        }
+        viewModelScope.launch {
+            bleManager.setSpectrumConfig(targetIds, config)
+        }
+    }
+
+    fun setSchedulerEnabled(enabled: Boolean) {
+        val targetIds = resolveConnectedControlTargetIds(uiState.value)
+        if (targetIds.isEmpty()) {
+            return
+        }
+        viewModelScope.launch {
+            bleManager.setSchedulerEnabled(targetIds, enabled)
+            bleManager.requestSchedulerStatus(targetIds)
+            bleManager.requestSchedulerConfig(targetIds)
+        }
+    }
+
+    fun setSchedulerRule(rule: com.wild.android.ble.SchedulerRuleUiState) {
+        val targetIds = resolveConnectedControlTargetIds(uiState.value)
+        if (targetIds.isEmpty()) {
+            return
+        }
+        viewModelScope.launch {
+            bleManager.setSchedulerRule(targetIds, rule)
+            bleManager.requestSchedulerConfig(targetIds)
+        }
+    }
+
+    fun setSchedulerRuleEnabled(ruleId: Int, enabled: Boolean) {
+        val targetIds = resolveConnectedControlTargetIds(uiState.value)
+        if (targetIds.isEmpty()) {
+            return
+        }
+        viewModelScope.launch {
+            bleManager.setSchedulerRuleEnabled(targetIds, ruleId, enabled)
+            bleManager.requestSchedulerConfig(targetIds)
+        }
+    }
+
+    fun clearSchedulerRule(ruleId: Int) {
+        val targetIds = resolveConnectedControlTargetIds(uiState.value)
+        if (targetIds.isEmpty()) {
+            return
+        }
+        viewModelScope.launch {
+            bleManager.clearSchedulerRule(targetIds, ruleId)
+            bleManager.requestSchedulerConfig(targetIds)
+        }
+    }
+
+    fun clearScheduler() {
+        val targetIds = resolveConnectedControlTargetIds(uiState.value)
+        if (targetIds.isEmpty()) {
+            return
+        }
+        viewModelScope.launch {
+            bleManager.clearScheduler(targetIds)
+            bleManager.requestSchedulerStatus(targetIds)
+            bleManager.requestSchedulerConfig(targetIds)
+        }
+    }
+
     fun startAutoImpedance(intervalMinutes: Int) {
         val activeSession = uiState.value.activeSession
         if (activeSession == null) {
@@ -1344,6 +1544,89 @@ class WildViewModel(
         }
     }
 
+    /** Reads the picked fused Intel-HEX firmware into the bounded CE64 validator. */
+    fun selectBleOtaPackage(uri: Uri) {
+        val activeId = uiState.value.activeSessionId ?: return
+        viewModelScope.launch {
+            val application = getApplication<Application>()
+            val packageName = displayNameFor(uri).ifBlank { "CE64 fused firmware.hex" }
+            val bytes = runCatching {
+                application.contentResolver.openInputStream(uri)?.use { input ->
+                    val output = ByteArrayOutputStream()
+                    val buffer = ByteArray(16 * 1024)
+                    while (true) {
+                        val count = input.read(buffer)
+                        if (count <= 0) {
+                            break
+                        }
+                        if (output.size() + count > Ce64BleOtaPackage.MaxFusedHexBytes) {
+                            throw IllegalArgumentException("The selected fused firmware file exceeds the supported size limit.")
+                        }
+                        output.write(buffer, 0, count)
+                    }
+                    output.toByteArray()
+                } ?: throw IllegalArgumentException("Android could not open the selected firmware package.")
+            }.getOrElse { error ->
+                Log.w("WildViewModel", "Could not read fused CE64 firmware $packageName", error)
+                // Passing an empty payload surfaces a normal validation error in
+                // the selected device's maintenance card instead of failing silently.
+                ByteArray(0)
+            }
+            bleManager.prepareBleOta(activeId, bytes, packageName)
+        }
+    }
+
+    fun stageBleOta() {
+        val activeId = uiState.value.activeSessionId ?: return
+        viewModelScope.launch {
+            bleManager.stageBleOta(activeId)
+        }
+    }
+
+    fun installStagedBleOta() {
+        val activeId = uiState.value.activeSessionId ?: return
+        viewModelScope.launch {
+            bleManager.installStagedBleOta(activeId)
+        }
+    }
+
+    private fun displayNameFor(uri: Uri): String {
+        val resolver = getApplication<Application>().contentResolver
+        return resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+            val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+            if (index >= 0 && cursor.moveToFirst()) cursor.getString(index).orEmpty() else ""
+        }.orEmpty()
+    }
+
+    fun requestAiModuleInstall(slot: Int) {
+        val activeId = uiState.value.activeSessionId ?: return
+        viewModelScope.launch {
+            bleManager.requestAiModuleInstall(activeId, slot)
+        }
+    }
+
+    fun selectAiModule(slot: Int?) {
+        val activeId = uiState.value.activeSessionId ?: return
+        viewModelScope.launch {
+            bleManager.selectAiModule(activeId, slot)
+        }
+    }
+
+    fun setAiRuntimeEnabled(enabled: Boolean) {
+        val activeId = uiState.value.activeSessionId ?: return
+        viewModelScope.launch {
+            bleManager.setAiRuntimeEnabled(activeId, enabled)
+        }
+    }
+
+    fun refreshAiRuntimeStatus() {
+        val activeId = uiState.value.activeSessionId ?: return
+        viewModelScope.launch {
+            bleManager.requestAiRuntimeStatus(activeId)
+            bleManager.requestAiResidentStatus(activeId)
+        }
+    }
+
     fun setRole(mode: Int, label: String) {
         val activeId = uiState.value.activeSessionId ?: return
         viewModelScope.launch {
@@ -1420,7 +1703,10 @@ class WildViewModel(
         viewModelScope.launch {
             val sessionBeforeLaunch = sessionForId(deviceId) ?: return@launch
             if (!sessionBeforeLaunch.isConnected && !sessionBeforeLaunch.isLinkingLike) {
-                bleManager.connect(deviceId, makeActive = false, fastBootstrap = true)
+                // Use the ordinary CE handshake here.  The device dashboard has
+                // already made this session active; launching a parallel fast
+                // connect can leave the control screen behind that selection.
+                bleManager.connect(deviceId, makeActive = false)
             }
 
             val settledSession = waitForControlLaunchReady(deviceId, ConnectAndSyncTimeoutMs)
@@ -1434,8 +1720,9 @@ class WildViewModel(
                 return@launch
             }
 
-            bleManager.requestAllParams(listOf(deviceId))
-            bleManager.requestCameraParams(listOf(deviceId))
+            // System and DSP payloads are loaded by the sequential connection
+            // bootstrap.  DeviceParameterScreen requests the optional camera
+            // payload only after that core sequence is complete.
         }
     }
 

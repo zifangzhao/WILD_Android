@@ -297,6 +297,174 @@ data class ImpedanceSnapshotUiState(
     val updatedAtMs: Long = 0L,
 )
 
+/** The persistent 512-byte configuration used by CE64's live transient viewer. */
+data class SpikeDetectorConfigUiState(
+    val enabled: Boolean = false,
+    val channelEnableMask: Long = 0L,
+    val positivePolarityMask: Long = 0L,
+    val thresholds: List<Int> = List(64) { 120 },
+    val refractorySamples: Int = 0,
+    val hpfShift: Int = 4,
+    val confirmationTag: Int = 0,
+) {
+    fun channelEnabled(channel: Int): Boolean =
+        channel in 0..63 && (channelEnableMask and (1L shl channel)) != 0L
+
+    fun positivePolarity(channel: Int): Boolean =
+        channel in 0..63 && (positivePolarityMask and (1L shl channel)) != 0L
+}
+
+/** One best-effort, 32-sample waveform produced by the CE64 live spike viewer. */
+data class LiveSpikeEventUiState(
+    val channel: Int,
+    val positivePolarity: Boolean,
+    val sequence: Long,
+    val sampleIndex: Long,
+    val droppedTotal: Long,
+    val samples: List<Int>,
+    val receivedAtMs: Long,
+)
+
+data class SpectrumConfigUiState(
+    val enabled: Boolean = false,
+    val dwtProfileEnabled: Boolean = false,
+    val source: Int = 0,
+    val channel: Int = 0,
+    val firstBin: Int = 16,
+    val lastBin: Int = 63,
+    val periodMs: Int = 200,
+    val fftReady: Boolean = false,
+    val skippedUpdates: Int = 0,
+) {
+    val sourceLabel: String
+        get() = if (source == 1) "Ephys ch $channel" else "ADC"
+}
+
+/** A completed 16-band selected-signal spectrum snapshot. */
+data class SpectrumSnapshotUiState(
+    val sequence: Long = 0L,
+    val source: Int = 0,
+    val channel: Int = 0,
+    val windowStartSample: Long = 0L,
+    val peakBin: Int = 0,
+    val peakLevel: Int = 0,
+    val noiseLevel: Int = 0,
+    val confidence: Int = 0,
+    val cycleK: Int = 0,
+    val dwtCycleValid: Boolean = false,
+    val levels: List<Int> = emptyList(),
+    val receivedBandsMask: Int = 0,
+    val isComplete: Boolean = false,
+    val updatedAtMs: Long = 0L,
+)
+
+data class CpuLoadUiState(
+    val busyPercent: Int,
+    val windowSeconds: Int,
+    val updatedAtMs: Long,
+)
+
+/** Device-local CE64 low-power scheduler status. All timestamps are CE64 RTC seconds. */
+data class SchedulerStatusUiState(
+    val version: Int,
+    val enabled: Boolean,
+    val clockValid: Boolean,
+    val activeIdle: Boolean,
+    val generation: Long,
+    val nextWakeSeconds: Long?,
+    val lastRuleId: Int,
+    val lastAction: Int,
+    val lastResult: Int,
+    val activeRuleId: Int,
+    val lastTimeSeconds: Long,
+    val deferredCount: Long,
+    val missedCount: Long,
+    val conflictCount: Long,
+)
+
+/** Exactly mirrors one 48-byte CE64 scheduler rule (protocol version 2). */
+data class SchedulerRuleUiState(
+    val id: Int,
+    val enabled: Boolean = false,
+    val trigger: Int = 0,
+    val action: Int = 0,
+    val missedPolicy: Int = 0,
+    val profileId: Int = 0xFF,
+    val conditionMask: Int = 0,
+    val conditionLogic: Int = 0,
+    val priority: Int = 0,
+    val anchorDay: Long = 0L,
+    val timeOfDaySeconds: Long = 0L,
+    val periodSeconds: Long = 0L,
+    val durationSeconds: Long = 0L,
+    val evaluationSeconds: Long = 60L,
+    val batteryThresholdMv: Int = 0,
+    val storageThresholdBlocks: Long = 0L,
+    val activityThresholdMg: Int = 0,
+    val aiThresholdQ15: Int = 0,
+    val hysteresis: Int = 0,
+    val debounceCount: Int = 1,
+    val maxDeferrals: Int = 1,
+    val marker: Int = 0,
+    val signalSource: Int = 0,
+    val conditionInvertMask: Int = 0,
+) {
+    val triggerLabel: String
+        get() = when (trigger) {
+            0 -> "Daily"
+            1 -> "Once"
+            2 -> "Repeat"
+            3 -> "Signal"
+            else -> "Unknown"
+        }
+
+    val actionLabel: String
+        get() = when (action) {
+            0 -> "Start recording"
+            1 -> "Stop recording"
+            2 -> "Marker"
+            3 -> "Restart"
+            else -> "Unknown"
+        }
+}
+
+data class SchedulerConfigUiState(
+    val version: Int,
+    val generation: Long,
+    val enabled: Boolean,
+    val rules: List<SchedulerRuleUiState>,
+    val profileCrc32: List<Long>,
+    val profileGenerations: List<Long>,
+)
+
+data class AiRuntimeStatusUiState(
+    val layoutReady: Boolean,
+    val hasSelectedSlot: Boolean,
+    val requestedEnabled: Boolean,
+    val running: Boolean,
+    val loadableBackend: Boolean,
+    val activeSlot: Int?,
+    val statusCode: Int,
+    val runtimeWindowAddress: Long,
+    val runtimeWindowBytes: Long,
+    val inputBufferBytes: Long,
+    val outputBufferBytes: Long,
+    val executionTime: Long,
+)
+
+data class AiResidentSlotStatusUiState(
+    val slot: Int,
+    val present: Boolean,
+    val statusCode: Int,
+    val storageStartAddress: Long,
+    val storageCapacityBytes: Long,
+    val imageSizeBytes: Long,
+    val imageFlags: Long,
+    val runtimeRamAddress: Long,
+    val requiredArenaBytes: Long,
+    val inputBytes: Long,
+)
+
 data class BleLinkStatsUiState(
     val packetCount: Long,
     val missingPacketCount: Long,
@@ -320,6 +488,51 @@ data class RssiSampleUiState(
     val valueDbm: Int,
 )
 
+/** A time-stamped snapshot of CE64 manufacturer advertisement telemetry. */
+data class AdvertisementStatusSampleUiState(
+    val timestampMs: Long,
+    val voltage: Double?,
+    val recording: Boolean?,
+    val previewing: Boolean?,
+    val failedSubsystems: Int?,
+    val degradedSubsystems: Int?,
+    val storageUsedPercent: Int?,
+    val recordingSeconds: Long?,
+    val lastEventCode: Int?,
+) {
+    val hasStateTelemetry: Boolean
+        get() = recording != null || previewing != null ||
+            failedSubsystems != null || degradedSubsystems != null
+}
+
+enum class BleOtaPhase {
+    Idle,
+    PackageReady,
+    Staging,
+    Verifying,
+    ReadyToInstall,
+    InstallRequested,
+    Failed,
+}
+
+data class BleOtaUiState(
+    val phase: BleOtaPhase = BleOtaPhase.Idle,
+    val packageName: String = "",
+    val generation: Long = 0L,
+    val imageBytes: Int = 0,
+    val imageCrc32: Long = 0L,
+    val completedBlocks: Int = 0,
+    val totalBlocks: Int = 0,
+    val statusMessage: String = "No fused firmware file selected",
+    val failureMessage: String = "",
+) {
+    val progressFraction: Float
+        get() = if (totalBlocks > 0) completedBlocks.coerceIn(0, totalBlocks).toFloat() / totalBlocks else 0f
+
+    val hasPreparedPackage: Boolean
+        get() = phase != BleOtaPhase.Idle
+}
+
 data class DeviceSessionUiState(
     val id: String,
     val name: String,
@@ -337,7 +550,9 @@ data class DeviceSessionUiState(
     val lastFailure: String = "",
     val rssi: Int? = null,
     val rssiHistory: List<RssiSampleUiState> = emptyList(),
+    val advertisementHistory: List<AdvertisementStatusSampleUiState> = emptyList(),
     val advertisedVoltage: Double? = null,
+    val advertisedHealthStatus: Ce64AdvertisementStatus? = null,
     val hasAdvertisementTelemetry: Boolean = false,
     val lastSeenAtMs: Long = 0L,
     val previewPacketCount: Int = 0,
@@ -377,6 +592,16 @@ data class DeviceSessionUiState(
     val cameraSnapshotImage: ByteArray = byteArrayOf(),
     val cameraSnapshotFrameId: Int = 0,
     val impedanceSnapshot: ImpedanceSnapshotUiState = ImpedanceSnapshotUiState(),
+    val spikeDetectorConfig: SpikeDetectorConfigUiState? = null,
+    val recentSpikeEvents: List<LiveSpikeEventUiState> = emptyList(),
+    val spikeViewerDropCount: Long = 0L,
+    val spectrumConfig: SpectrumConfigUiState? = null,
+    val spectrumSnapshot: SpectrumSnapshotUiState? = null,
+    val cpuLoad: CpuLoadUiState? = null,
+    val schedulerStatus: SchedulerStatusUiState? = null,
+    val schedulerConfig: SchedulerConfigUiState? = null,
+    val schedulerProfileReceiveMask: Int = 0,
+    val schedulerProfileWriteMask: Int = 0,
     val records: List<RecordSummary> = emptyList(),
     val ledOn: Boolean = false,
     val gpio0Mode: GpioMode = GpioMode.Unknown,
@@ -386,16 +611,30 @@ data class DeviceSessionUiState(
     val impedanceExportPath: String = "",
     val triggerWaveformEnabled: Boolean = false,
     val triggeredWaveformBlockCount: Int = 0,
+    val triggeredWaveformBlocksByLane: Map<Int, Int> = emptyMap(),
+    val latestTriggeredWaveforms: Map<Int, List<Int>> = emptyMap(),
     val lastTriggeredWaveformBytes: Int = 0,
     val triggerWaveformCaptureBytes: Long = 0L,
     val triggerWaveformCapturePath: String = "",
     val triggerWaveformCaptureActive: Boolean = false,
+    val aiRuntimeStatus: AiRuntimeStatusUiState? = null,
+    val aiResidentSlotStatuses: Map<Int, AiResidentSlotStatusUiState> = emptyMap(),
+    val bleOta: BleOtaUiState = BleOtaUiState(),
     val recentEvents: List<SessionEventUiState> = emptyList(),
     val isLegacyWakeFirmware: Boolean = false,
     val isActive: Boolean = false,
+    val recorderBackedLiveSignal: Boolean = false,
+    /** True after the host has explicitly sent the live-waveform start command (0x40). */
+    val waveformPreviewActive: Boolean = false,
 ) {
+    /**
+     * A shared 0xFFF0 service alone is not a device identity: unrelated BLE
+     * peripherals can advertise it. A device is eligible only after a known
+     * WILD/CE name, an authenticated CE64 status advertisement, or a completed
+     * protocol handshake has confirmed it.
+     */
     val bulkConnectEligible: Boolean
-        get() = verifiedTransport || advertisedServiceMatch || namePrefixMatch
+        get() = verifiedTransport || namePrefixMatch || advertisedHealthStatus != null
 
     val gpio0High: Boolean
         get() = gpio0Mode == GpioMode.High

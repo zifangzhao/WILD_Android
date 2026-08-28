@@ -22,12 +22,41 @@ object Ce32Protocol {
 
     val ServiceParcelUuid: ParcelUuid = ParcelUuid(ServiceUuid)
     private val acceptedPrefixes = listOf("CE32", "CE64", "CE128", "WILD", "XENP")
-    val CommonEphysRates = listOf(625, 1250, 2500, 5000, 10000, 20000, 30000)
+    // Match the CE32 online-console menu and the 0x32 (quick FS) command.
+    // FS = 0 is an intentional acquisition-off value, not an invalid rate.
+    val CommonEphysRates = listOf(0, 1250, 2500, 5000, 10000, 20000)
 
     const val CameraSnapshotCommand = 0xAC
     const val CameraPreviewCommand = 0x9F
     const val CameraSnapshotPixels = 160
     const val CameraPreviewPixels = 40
+    const val AiModuleEphysSlot = 0
+    const val AiModuleImuSlot = 1
+    const val AiModuleEphysStagingBlock = 0x1000
+    const val AiModuleImuStagingBlock = 0x1200
+    const val SpikeDetectorChannelCount = 64
+    const val SpikeDetectorParamBytes = 512
+    const val SpikeDetectorSupportedRateHz = 20_000
+    const val SpectrumProtocolVersion = 4
+    const val SpectrumDisplayBinCount = 16
+    const val SpectrumSourceAdc = 0
+    const val SpectrumSourceEphys = 1
+    const val SchedulerRuleCount = 8
+    const val SchedulerRuleBytes = 48
+    const val SchedulerConfigBytes = 472
+    const val SchedulerProfileChunkBytes = 32
+    const val SchedulerProfileChunkCount = 16
+    const val SchedulerCommandStatus = 0xD0
+    const val SchedulerCommandList = 0xD1
+    const val SchedulerCommandSetRule = 0xD2
+    const val SchedulerCommandEnableRule = 0xD3
+    const val SchedulerCommandClearRule = 0xD4
+    const val SchedulerCommandClearAll = 0xD5
+    const val SchedulerCommandGlobalEnable = 0xD6
+    const val SchedulerEventDiagnostic = 0xD7
+    const val SchedulerResponse = 0xD8
+    const val SchedulerCommandProfileRead = 0xD9
+    const val SchedulerCommandProfileWrite = 0xDB
     private const val PackedTime20Mask = 0x000FFFFF
     private const val PackedDelay12Max = 0x0FFF
     const val SectorData = 0x2000L
@@ -141,16 +170,29 @@ object Ce32Protocol {
             0x8D -> 24
             0x8E -> 25
             0x8F -> 4
-            0x90, 0x91, 0x92 -> 512
+            0x90, 0x91, 0x92, 0x9C -> 512
             0x94 -> 512
             0x95 -> 4
+            0x9A -> 14
             0x9D -> 4
             CameraSnapshotCommand -> 1 + CameraSnapshotPixels
             CameraPreviewCommand -> 1 + CameraPreviewPixels
             0xAD -> 136
+            0xA2 -> 512
             0xAE -> 512
             0xAF -> 10
-            0xB0, 0xB1 -> 2
+            0x99 -> 26
+            0x9B -> 34
+            0xB0 -> 16
+            0xB1 -> 15
+            0xB2 -> 84
+            0xB3 -> 3
+            Ce64BleOtaProtocol.CommandBegin,
+            Ce64BleOtaProtocol.CommandWrite,
+            Ce64BleOtaProtocol.CommandFinish,
+            Ce64BleOtaProtocol.CommandStatus,
+            Ce64BleOtaProtocol.CommandInstall -> Ce64BleOtaProtocol.ReplyPayloadBytes
+            SchedulerEventDiagnostic -> 32
             0xC0 -> 1
             0xF0, 0xF1, 0xF2, 0xF3, 0xF4 -> 512
             0xEE -> 3
@@ -195,7 +237,7 @@ object Ce32Protocol {
     }
 
     fun buildQuickFsCommand(ephysRate: Int): ByteArray {
-        val safeRate = ephysRate.coerceIn(1, 0xFFFF)
+        val safeRate = ephysRate.coerceIn(0, 0xFFFF)
         return byteArrayOf(
             0x3C.toByte(),
             0x32.toByte(),
@@ -329,8 +371,11 @@ object Ce32Protocol {
         channels: List<Int>,
     ): ByteArray {
         val commandId = if (dspIndex.coerceIn(0, 1) == 0) 0x22 else 0x23
-        val safeChannels = IntArray(3) { index -> channels.getOrElse(index) { 0 }.coerceAtLeast(0) }
-        val buffer = ByteBuffer.allocate(27).order(ByteOrder.LITTLE_ENDIAN)
+        // CE64 accepts four 0-based source channels (A through D) in the
+        // current 0x22 / 0x23 live-DSP command.  Older Android builds sent
+        // only A-C, silently leaving D unchanged on the device.
+        val safeChannels = IntArray(4) { index -> channels.getOrElse(index) { 0 }.coerceIn(0, 63) }
+        val buffer = ByteBuffer.allocate(31).order(ByteOrder.LITTLE_ENDIAN)
         buffer.put(0x3C.toByte())
         buffer.put(commandId.toByte())
         buffer.putInt(maOrder.coerceAtLeast(0))
@@ -360,6 +405,93 @@ object Ce32Protocol {
         return frame(commandId, payload)
     }
 
+    fun buildSpikeDetectorConfig(config: SpikeDetectorConfigUiState, confirmationTag: Int = config.confirmationTag): ByteArray {
+        val payload = ByteArray(SpikeDetectorParamBytes)
+        putU32(payload, 0, 0x314B5053)
+        putU16(payload, 4, 2)
+        putU16(payload, 6, if (config.enabled) 0x01 else 0x00)
+        putU64(payload, 8, config.channelEnableMask)
+        putU64(payload, 16, config.positivePolarityMask)
+        repeat(SpikeDetectorChannelCount) { channel ->
+            putI16(payload, 24 + channel * 2, config.thresholds.getOrElse(channel) { 120 }.coerceIn(1, Short.MAX_VALUE.toInt()))
+        }
+        putU16(payload, 152, config.refractorySamples.coerceIn(0, 0xFFFF))
+        payload[154] = config.hpfShift.coerceIn(1, 8).toByte()
+        payload[155] = confirmationTag.coerceIn(0, 0xFF).toByte()
+        return frame(0x24, payload)
+    }
+
+    fun buildReadSpikeDetectorConfig(): ByteArray = frame(0x9C)
+
+    fun buildSpectrumConfig(config: SpectrumConfigUiState): ByteArray {
+        val flags = (if (config.enabled) 0x01 else 0x00) or
+            (if (config.dwtProfileEnabled) 0x02 else 0x00)
+        val payload = ByteBuffer.allocate(11).order(ByteOrder.LITTLE_ENDIAN)
+            .put(SpectrumProtocolVersion.toByte())
+            .put(flags.toByte())
+            .put(SpectrumDisplayBinCount.toByte())
+            .put(config.source.coerceIn(SpectrumSourceAdc, SpectrumSourceEphys).toByte())
+            .put(config.channel.coerceIn(0, 63).toByte())
+            .putShort(config.firstBin.coerceIn(1, 63).toShort())
+            .putShort(config.lastBin.coerceIn(config.firstBin.coerceIn(1, 63), 63).toShort())
+            .putShort(config.periodMs.coerceIn(100, 1_000).toShort())
+            .array()
+        return frame(0x25, payload)
+    }
+
+    fun buildReadSpectrumConfig(): ByteArray = frame(0x9A)
+
+    fun buildSchedulerStatusRequest(): ByteArray = frame(SchedulerCommandStatus)
+
+    fun buildSchedulerListRequest(): ByteArray = frame(SchedulerCommandList)
+
+    fun buildSchedulerRuleUpdate(rule: SchedulerRuleUiState): ByteArray =
+        frame(SchedulerCommandSetRule, schedulerRuleBytes(rule))
+
+    fun buildSchedulerRuleEnable(ruleId: Int, enabled: Boolean): ByteArray =
+        frame(SchedulerCommandEnableRule, byteArrayOf(ruleId.coerceIn(0, SchedulerRuleCount - 1).toByte(), if (enabled) 1 else 0))
+
+    fun buildSchedulerRuleClear(ruleId: Int): ByteArray =
+        frame(SchedulerCommandClearRule, byteArrayOf(ruleId.coerceIn(0, SchedulerRuleCount - 1).toByte()))
+
+    fun buildSchedulerClearAll(): ByteArray = frame(SchedulerCommandClearAll, byteArrayOf(0x5A))
+
+    fun buildSchedulerGlobalEnable(enabled: Boolean): ByteArray =
+        frame(SchedulerCommandGlobalEnable, byteArrayOf(if (enabled) 1 else 0))
+
+    fun buildSchedulerProfileRead(profileId: Int, chunkIndex: Int): ByteArray =
+        frame(
+            SchedulerCommandProfileRead,
+            byteArrayOf(
+                profileId.coerceIn(0, SchedulerRuleCount - 1).toByte(),
+                chunkIndex.coerceIn(0, SchedulerProfileChunkCount - 1).toByte(),
+            ),
+        )
+
+    fun buildSchedulerProfileWrite(profileId: Int, chunkIndex: Int, data: ByteArray): ByteArray {
+        val chunk = data.copyOf(SchedulerProfileChunkBytes)
+        return frame(
+            SchedulerCommandProfileWrite,
+            byteArrayOf(
+                profileId.coerceIn(0, SchedulerRuleCount - 1).toByte(),
+                chunkIndex.coerceIn(0, SchedulerProfileChunkCount - 1).toByte(),
+            ) + chunk,
+        )
+    }
+
+    fun schedulerResponsePayloadLengthFor(requestCommand: Int): Int? = when (requestCommand) {
+        SchedulerCommandStatus -> 33
+        SchedulerCommandList -> 1 + SchedulerConfigBytes
+        SchedulerCommandSetRule,
+        SchedulerCommandEnableRule,
+        SchedulerCommandClearRule,
+        SchedulerCommandClearAll,
+        SchedulerCommandGlobalEnable -> 2
+        SchedulerCommandProfileRead -> 1 + 3 + SchedulerProfileChunkBytes
+        SchedulerCommandProfileWrite -> 4
+        else -> null
+    }
+
     fun buildForceTrigger(index: Int): ByteArray =
         byteArrayOf(0x3C.toByte(), 0x60.toByte(), (0x01 shl index.coerceIn(0, 7)).toByte(), 0x3E.toByte())
 
@@ -373,6 +505,41 @@ object Ce32Protocol {
 
     // Windows uses outbound 0xAE for firmware-update entry even though inbound 0xAE is waveform payload data.
     fun buildFirmwareImageUpdate(): ByteArray = byteArrayOf(0x3C.toByte(), 0xAE.toByte(), 0x3E.toByte())
+
+    /**
+     * Requests installation of an AI module that has already been staged to the
+     * device SD card by the desktop workflow. The CE32_console uses the same
+     * fixed slots and staging blocks before sending this BLE request.
+     */
+    fun buildAiModuleInstall(slot: Int): ByteArray {
+        val safeSlot = slot.coerceIn(AiModuleEphysSlot, AiModuleImuSlot)
+        val stagingBlock = if (safeSlot == AiModuleImuSlot) {
+            AiModuleImuStagingBlock
+        } else {
+            AiModuleEphysStagingBlock
+        }
+        return byteArrayOf(
+            0x3C.toByte(),
+            0x96.toByte(),
+            safeSlot.toByte(),
+            (stagingBlock and 0xFF).toByte(),
+            ((stagingBlock shr 8) and 0xFF).toByte(),
+            ((stagingBlock shr 16) and 0xFF).toByte(),
+            ((stagingBlock shr 24) and 0xFF).toByte(),
+            0x3E.toByte(),
+        )
+    }
+
+    fun buildAiModuleSelect(slot: Int?): ByteArray =
+        frame(0x97, byteArrayOf((slot ?: 0xFF).coerceIn(0, 0xFF).toByte()))
+
+    fun buildAiRuntimeEnable(enabled: Boolean): ByteArray =
+        frame(0x98, byteArrayOf(if (enabled) 0x01 else 0x00))
+
+    fun buildAiRuntimeStatusRequest(): ByteArray = frame(0x99)
+
+    fun buildAiResidentStatusRequest(slot: Int? = null): ByteArray =
+        frame(0x9B, byteArrayOf((slot ?: 0xFF).coerceIn(0, 0xFF).toByte()))
 
     fun buildPackedTimeMeasurement(delayMs: Int = 0, now: ZonedDateTime = ZonedDateTime.now()): ByteArray {
         val msSinceMidnight = (now.toLocalTime().toNanoOfDay() / 1_000_000L).toInt()
@@ -399,8 +566,216 @@ object Ce32Protocol {
 
     fun buildImpedanceTest(): ByteArray = byteArrayOf(0x3C.toByte(), 0x51.toByte(), 0x3E.toByte())
 
+    /**
+     * CE64's current closed-loop viewer uses bits 0/1 for CL1/CL2 and bit 7
+     * for continuous best-effort delivery.  Earlier Android builds sent 0x01,
+     * which only requested a legacy one-shot CL1 capture.
+     */
     fun buildTriggerWaveform(enabled: Boolean): ByteArray =
-        byteArrayOf(0x3C.toByte(), 0x43.toByte(), if (enabled) 0x01.toByte() else 0x00.toByte(), 0x3E.toByte())
+        byteArrayOf(0x3C.toByte(), 0x43.toByte(), if (enabled) 0x83.toByte() else 0x00.toByte(), 0x3E.toByte())
+
+    fun parseAiRuntimeStatus(payload: ByteArray): AiRuntimeStatusUiState? {
+        if (payload.size < 26) {
+            return null
+        }
+
+        val flags = payload[0].toInt() and 0xFF
+        val rawSlot = payload[1].toInt() and 0xFF
+        return AiRuntimeStatusUiState(
+            layoutReady = flags and 0x01 != 0,
+            hasSelectedSlot = flags and 0x02 != 0,
+            requestedEnabled = flags and 0x04 != 0,
+            running = flags and 0x08 != 0,
+            loadableBackend = flags and 0x10 != 0,
+            activeSlot = rawSlot.takeIf { it in AiModuleEphysSlot..AiModuleImuSlot },
+            statusCode = i32(payload, 2),
+            runtimeWindowAddress = u32(payload, 6),
+            runtimeWindowBytes = u32(payload, 10),
+            inputBufferBytes = u32(payload, 14),
+            outputBufferBytes = u32(payload, 18),
+            executionTime = u32(payload, 22),
+        )
+    }
+
+    fun parseAiResidentSlotStatus(payload: ByteArray): AiResidentSlotStatusUiState? {
+        if (payload.size < 34) {
+            return null
+        }
+
+        val slot = payload[0].toInt() and 0xFF
+        if (slot !in AiModuleEphysSlot..AiModuleImuSlot) {
+            return null
+        }
+
+        return AiResidentSlotStatusUiState(
+            slot = slot,
+            present = payload[1].toInt() and 0xFF != 0,
+            statusCode = i32(payload, 2),
+            storageStartAddress = u32(payload, 6),
+            storageCapacityBytes = u32(payload, 10),
+            imageSizeBytes = u32(payload, 14),
+            imageFlags = u32(payload, 18),
+            runtimeRamAddress = u32(payload, 22),
+            requiredArenaBytes = u32(payload, 26),
+            inputBytes = u32(payload, 30),
+        )
+    }
+
+    fun parseSpikeDetectorConfig(payload: ByteArray): SpikeDetectorConfigUiState? {
+        if (payload.size < SpikeDetectorParamBytes || u32(payload, 0) != 0x314B5053L || u16(payload, 4) != 2) {
+            return null
+        }
+        return SpikeDetectorConfigUiState(
+            enabled = u16(payload, 6) and 0x01 != 0,
+            channelEnableMask = i64(payload, 8),
+            positivePolarityMask = i64(payload, 16),
+            thresholds = List(SpikeDetectorChannelCount) { channel -> i16(payload, 24 + channel * 2) },
+            refractorySamples = u16(payload, 152),
+            hpfShift = payload[154].toInt() and 0xFF,
+            confirmationTag = payload[155].toInt() and 0xFF,
+        )
+    }
+
+    fun parseLiveSpikeEvent(payload: ByteArray, receivedAtMs: Long = System.currentTimeMillis()): LiveSpikeEventUiState? {
+        if (payload.size < 84 || (payload[0].toInt() and 0xFF) != 1) {
+            return null
+        }
+        val channel = payload[1].toInt() and 0xFF
+        if (channel !in 0 until SpikeDetectorChannelCount) {
+            return null
+        }
+        return LiveSpikeEventUiState(
+            channel = channel,
+            positivePolarity = payload[2].toInt() and 0x01 != 0,
+            sequence = u32(payload, 4),
+            sampleIndex = i64(payload, 8),
+            droppedTotal = u32(payload, 16),
+            samples = List(32) { sample -> i16(payload, 20 + sample * 2) },
+            receivedAtMs = receivedAtMs,
+        )
+    }
+
+    fun parseCpuLoad(payload: ByteArray, updatedAtMs: Long = System.currentTimeMillis()): CpuLoadUiState? {
+        if (payload.size < 3 || (payload[0].toInt() and 0xFF) != 1) {
+            return null
+        }
+        return CpuLoadUiState(
+            busyPercent = (payload[1].toInt() and 0xFF).coerceIn(0, 100),
+            windowSeconds = payload[2].toInt() and 0xFF,
+            updatedAtMs = updatedAtMs,
+        )
+    }
+
+    fun parseSpectrumConfig(payload: ByteArray): SpectrumConfigUiState? {
+        if (payload.size < 14 || (payload[0].toInt() and 0xFF) != SpectrumProtocolVersion) {
+            return null
+        }
+        val source = payload[3].toInt() and 0xFF
+        val channel = payload[4].toInt() and 0xFF
+        if (source !in SpectrumSourceAdc..SpectrumSourceEphys || (source == SpectrumSourceAdc && channel != 0) ||
+            (source == SpectrumSourceEphys && channel !in 0..63)
+        ) {
+            return null
+        }
+        val flags = payload[1].toInt() and 0xFF
+        val fftStatus = payload[11].toInt() and 0xFF
+        return SpectrumConfigUiState(
+            enabled = flags and 0x01 != 0,
+            dwtProfileEnabled = flags and 0x02 != 0,
+            source = source,
+            channel = channel,
+            firstBin = u16(payload, 5),
+            lastBin = u16(payload, 7),
+            periodMs = u16(payload, 9),
+            fftReady = fftStatus and 0x80 != 0 && (fftStatus and 0x7F) == 7,
+            skippedUpdates = u16(payload, 12),
+        )
+    }
+
+    fun parseSpectrumMetadata(payload: ByteArray, updatedAtMs: Long = System.currentTimeMillis()): SpectrumSnapshotUiState? {
+        if (payload.size < 16 || (payload[0].toInt() and 0xFF) != SpectrumProtocolVersion) {
+            return null
+        }
+        val flags = payload[1].toInt() and 0xFF
+        val sourceTag = flags ushr 1
+        val source = if (sourceTag == 0) SpectrumSourceAdc else SpectrumSourceEphys
+        val channel = if (sourceTag == 0) 0 else sourceTag - 1
+        if (channel !in 0..63) {
+            return null
+        }
+        return SpectrumSnapshotUiState(
+            sequence = u32(payload, 2),
+            source = source,
+            channel = channel,
+            windowStartSample = u32(payload, 6),
+            peakBin = u16(payload, 10),
+            peakLevel = payload[12].toInt() and 0xFF,
+            noiseLevel = payload[13].toInt() and 0xFF,
+            confidence = payload[14].toInt() and 0xFF,
+            cycleK = payload[15].toInt() and 0xFF,
+            dwtCycleValid = flags and 0x01 != 0,
+            updatedAtMs = updatedAtMs,
+        )
+    }
+
+    data class SpectrumBinsPacket(
+        val sequence: Long,
+        val firstIndex: Int,
+        val levels: List<Int>,
+    )
+
+    fun parseSpectrumBins(payload: ByteArray): SpectrumBinsPacket? {
+        if (payload.size < 7 || (payload[0].toInt() and 0xFF) != SpectrumProtocolVersion) {
+            return null
+        }
+        val count = payload[6].toInt() and 0xFF
+        val firstIndex = payload[5].toInt() and 0xFF
+        if (count <= 0 || count > SpectrumDisplayBinCount || firstIndex + count > SpectrumDisplayBinCount || payload.size < 7 + count) {
+            return null
+        }
+        return SpectrumBinsPacket(
+            sequence = u32(payload, 1),
+            firstIndex = firstIndex,
+            levels = List(count) { index -> payload[7 + index].toInt() and 0xFF },
+        )
+    }
+
+    fun parseSchedulerStatus(payload: ByteArray): SchedulerStatusUiState? {
+        if (payload.size < 32 || (payload[0].toInt() and 0xFF) != 2) {
+            return null
+        }
+        val nextWake = u32(payload, 8).takeUnless { it == 0xFFFF_FFFFL }
+        return SchedulerStatusUiState(
+            version = payload[0].toInt() and 0xFF,
+            enabled = payload[1].toInt() and 0x01 != 0,
+            clockValid = payload[2].toInt() and 0x01 != 0,
+            activeIdle = payload[3].toInt() and 0x01 != 0,
+            generation = u32(payload, 4),
+            nextWakeSeconds = nextWake,
+            lastRuleId = payload[12].toInt() and 0xFF,
+            lastAction = payload[13].toInt() and 0xFF,
+            lastResult = payload[14].toInt() and 0xFF,
+            activeRuleId = payload[15].toInt() and 0xFF,
+            lastTimeSeconds = u32(payload, 16),
+            deferredCount = u32(payload, 20),
+            missedCount = u32(payload, 24),
+            conflictCount = u32(payload, 28),
+        )
+    }
+
+    fun parseSchedulerConfig(payload: ByteArray): SchedulerConfigUiState? {
+        if (payload.size < SchedulerConfigBytes || u16(payload, 4) != 2 || u16(payload, 6) != SchedulerConfigBytes) {
+            return null
+        }
+        return SchedulerConfigUiState(
+            version = u16(payload, 4),
+            generation = u32(payload, 8),
+            enabled = u32(payload, 12) != 0L,
+            rules = List(SchedulerRuleCount) { index -> parseSchedulerRule(payload, 16 + index * SchedulerRuleBytes) },
+            profileCrc32 = List(SchedulerRuleCount) { index -> u32(payload, 400 + index * 4) },
+            profileGenerations = List(SchedulerRuleCount) { index -> u32(payload, 432 + index * 4) },
+        )
+    }
 
     fun build8CReply(requestPayload: ByteArray, now: ZonedDateTime = ZonedDateTime.now()): ByteArray {
         val sync = toSyncStamp(now)
@@ -772,6 +1147,64 @@ object Ce32Protocol {
             .array()
     }
 
+    private fun schedulerRuleBytes(rule: SchedulerRuleUiState): ByteArray {
+        val payload = ByteArray(SchedulerRuleBytes)
+        payload[0] = rule.id.coerceIn(0, SchedulerRuleCount - 1).toByte()
+        payload[1] = if (rule.enabled) 0x01 else 0x00
+        payload[2] = rule.trigger.coerceIn(0, 3).toByte()
+        payload[3] = rule.action.coerceIn(0, 3).toByte()
+        payload[4] = rule.missedPolicy.coerceIn(0, 1).toByte()
+        payload[5] = rule.profileId.coerceIn(0, 0xFF).toByte()
+        payload[6] = rule.conditionMask.coerceIn(0, 0x0F).toByte()
+        payload[7] = rule.conditionLogic.coerceIn(0, 1).toByte()
+        putU16(payload, 8, rule.priority)
+        putU32(payload, 10, rule.anchorDay.coerceIn(0L, 0xFFFF_FFFFL).toInt())
+        putU32(payload, 14, rule.timeOfDaySeconds.coerceIn(0L, 86_399L).toInt())
+        putU32(payload, 18, rule.periodSeconds.coerceIn(0L, 604_800L).toInt())
+        putU32(payload, 22, rule.durationSeconds.coerceIn(0L, 86_400L).toInt())
+        putU32(payload, 26, rule.evaluationSeconds.coerceIn(0L, 3_600L).toInt())
+        putU16(payload, 30, rule.batteryThresholdMv)
+        putU32(payload, 32, rule.storageThresholdBlocks.coerceIn(0L, 0xFFFF_FFFFL).toInt())
+        putU16(payload, 36, rule.activityThresholdMg)
+        putI16(payload, 38, rule.aiThresholdQ15.coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()))
+        putU16(payload, 40, rule.hysteresis)
+        payload[42] = rule.debounceCount.coerceIn(1, 0xFF).toByte()
+        payload[43] = rule.maxDeferrals.coerceIn(1, 24).toByte()
+        putU16(payload, 44, rule.marker)
+        payload[46] = rule.signalSource.coerceIn(0, 0x1F).toByte()
+        payload[47] = rule.conditionInvertMask.coerceIn(0, 0x0F).toByte()
+        return payload
+    }
+
+    private fun parseSchedulerRule(payload: ByteArray, offset: Int): SchedulerRuleUiState {
+        return SchedulerRuleUiState(
+            id = payload[offset].toInt() and 0xFF,
+            enabled = payload[offset + 1].toInt() and 0x01 != 0,
+            trigger = payload[offset + 2].toInt() and 0xFF,
+            action = payload[offset + 3].toInt() and 0xFF,
+            missedPolicy = payload[offset + 4].toInt() and 0xFF,
+            profileId = payload[offset + 5].toInt() and 0xFF,
+            conditionMask = payload[offset + 6].toInt() and 0xFF,
+            conditionLogic = payload[offset + 7].toInt() and 0xFF,
+            priority = u16(payload, offset + 8),
+            anchorDay = u32(payload, offset + 10),
+            timeOfDaySeconds = u32(payload, offset + 14),
+            periodSeconds = u32(payload, offset + 18),
+            durationSeconds = u32(payload, offset + 22),
+            evaluationSeconds = u32(payload, offset + 26),
+            batteryThresholdMv = u16(payload, offset + 30),
+            storageThresholdBlocks = u32(payload, offset + 32),
+            activityThresholdMg = u16(payload, offset + 36),
+            aiThresholdQ15 = i16(payload, offset + 38),
+            hysteresis = u16(payload, offset + 40),
+            debounceCount = payload[offset + 42].toInt() and 0xFF,
+            maxDeferrals = payload[offset + 43].toInt() and 0xFF,
+            marker = u16(payload, offset + 44),
+            signalSource = payload[offset + 46].toInt() and 0xFF,
+            conditionInvertMask = payload[offset + 47].toInt() and 0xFF,
+        )
+    }
+
     private fun uuidFromShortForm(shortForm: Long): UUID {
         return UUID.fromString(String.format("%08x-0000-1000-8000-00805f9b34fb", shortForm))
     }
@@ -795,6 +1228,9 @@ object Ce32Protocol {
     private fun u32(payload: ByteArray, offset: Int): Long =
         ByteBuffer.wrap(payload, offset, 4).order(ByteOrder.LITTLE_ENDIAN).int.toLong() and 0xFFFF_FFFFL
 
+    private fun i64(payload: ByteArray, offset: Int): Long =
+        ByteBuffer.wrap(payload, offset, 8).order(ByteOrder.LITTLE_ENDIAN).long
+
     private data class SyncStamp(
         val seconds: Int,
         val subSeconds: Int,
@@ -811,8 +1247,16 @@ object Ce32Protocol {
         ByteBuffer.wrap(payload, offset, 2).order(ByteOrder.LITTLE_ENDIAN).putShort(value.coerceIn(0, 0xFFFF).toShort())
     }
 
+    private fun putI16(payload: ByteArray, offset: Int, value: Int) {
+        ByteBuffer.wrap(payload, offset, 2).order(ByteOrder.LITTLE_ENDIAN).putShort(value.toShort())
+    }
+
     private fun putU32(payload: ByteArray, offset: Int, value: Int) {
         ByteBuffer.wrap(payload, offset, 4).order(ByteOrder.LITTLE_ENDIAN).putInt(value)
+    }
+
+    private fun putU64(payload: ByteArray, offset: Int, value: Long) {
+        ByteBuffer.wrap(payload, offset, 8).order(ByteOrder.LITTLE_ENDIAN).putLong(value)
     }
 
     private fun putF32(payload: ByteArray, offset: Int, value: Float) {

@@ -3,8 +3,13 @@ package com.wild.android
 import com.wild.android.ble.BleHostSessionState
 import com.wild.android.ble.ControlScope
 import com.wild.android.ble.DeviceSessionUiState
+import com.wild.android.ui.canStartLivePreview
+import com.wild.android.ui.hasLivePreviewControl
+import com.wild.android.ui.shouldReadCameraDuringControlLaunch
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 
 class WildUiStateSelectorsTest {
     @Test
@@ -167,6 +172,30 @@ class WildUiStateSelectorsTest {
     }
 
     @Test
+    fun recorderBackedLiveSignalRemainsControllableAsLiveSignal() {
+        val recorderBacked = session("fallback", BleHostSessionState.Recording).copy(
+            recorderBackedLiveSignal = true,
+        )
+        val ordinaryRecording = recorderBacked.copy(recorderBackedLiveSignal = false)
+        val directPreview = session("preview", BleHostSessionState.Previewing)
+
+        assertTrue(hasLivePreviewControl(recorderBacked))
+        assertFalse(hasLivePreviewControl(ordinaryRecording))
+        assertTrue(hasLivePreviewControl(directPreview))
+    }
+
+    @Test
+    fun explicitWaveformControlRemainsAvailableDuringRecording() {
+        val recording = session("recording", BleHostSessionState.Recording)
+        val waveformActive = recording.copy(waveformPreviewActive = true)
+
+        assertTrue(canStartLivePreview(recording))
+        assertFalse(hasLivePreviewControl(recording))
+        assertFalse(canStartLivePreview(waveformActive))
+        assertTrue(hasLivePreviewControl(waveformActive))
+    }
+
+    @Test
     fun previewRouteSessionsPreferActiveConnectedDeviceOverDisconnectedSelectedFallback() {
         val active = session("active", BleHostSessionState.Connected).copy(name = "Active")
         val disconnectedSelected = session("selected", BleHostSessionState.Disconnected).copy(name = "Selected")
@@ -241,12 +270,12 @@ class WildUiStateSelectorsTest {
     }
 
     @Test
-    fun scopeAfterSelectionChangeFallsBackToActiveWhenOnlyCandidatesRemainMarked() {
+    fun selectionChangePreservesExplicitScopeAndFallsBackWhenSelectedScopeEmpties() {
         val connected = session("connected", BleHostSessionState.Previewing)
         val candidate = session("candidate", BleHostSessionState.Disconnected)
 
         assertEquals(
-            ControlScope.SelectedDevices,
+            ControlScope.ActiveDevice,
             resolveScopeAfterSelectionChange(
                 previousScope = ControlScope.ActiveDevice,
                 sessions = listOf(connected, candidate),
@@ -353,6 +382,21 @@ class WildUiStateSelectorsTest {
         assertEquals(listOf("linking"), buckets.linking.map { it.id })
         assertEquals(listOf("verified"), buckets.verified.map { it.id })
         assertEquals(listOf("nearby"), buckets.nearby.map { it.id })
+    }
+
+    @Test
+    fun controlLaunchWaitsForCorePayloadBeforeRequestingOptionalCameraParams() {
+        val partial = session("partial", BleHostSessionState.Synced).copy(
+            systemParamHex = "01",
+        )
+        val coreReady = partial.copy(
+            dsp1ParamHex = "02",
+            dsp2ParamHex = "03",
+        )
+
+        assertFalse(shouldReadCameraDuringControlLaunch(partial))
+        assertTrue(shouldReadCameraDuringControlLaunch(coreReady))
+        assertFalse(shouldReadCameraDuringControlLaunch(coreReady.copy(cameraParamHex = "01")))
     }
 
     @Test

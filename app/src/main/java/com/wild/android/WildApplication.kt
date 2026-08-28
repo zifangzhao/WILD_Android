@@ -4,6 +4,7 @@ import android.app.Application
 import com.wild.android.ble.BleHostSessionState
 import com.wild.android.ble.Ce32BleManager
 import com.wild.android.ble.DeviceSessionUiState
+import com.wild.android.cloud.FirebaseFleetGateway
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -21,10 +22,31 @@ class WildApplication : Application() {
         Ce32BleManager(applicationContext, appScope)
     }
 
+    val cloudFleetGateway: FirebaseFleetGateway by lazy {
+        FirebaseFleetGateway(applicationContext, appScope)
+    }
+
+    val appUpdateChecker: AppUpdateChecker by lazy {
+        AppUpdateChecker(applicationContext)
+    }
+
+    private val deviceStatusNotifier: DeviceStatusNotifier by lazy {
+        DeviceStatusNotifier(applicationContext)
+    }
+
     private val uiForeground = MutableStateFlow(false)
+    @Volatile
+    private var fullExitRequested = false
 
     override fun onCreate() {
         super.onCreate()
+
+        appScope.launch {
+            bleManager.sessions.collect { sessions ->
+                deviceStatusNotifier.observe(sessions.values)
+                cloudFleetGateway.publishLocalFleet(sessions.values)
+            }
+        }
 
         appScope.launch {
             combine(uiForeground, bleManager.isScanning, bleManager.sessions) { _, _, _ ->
@@ -42,7 +64,16 @@ class WildApplication : Application() {
     }
 
     fun setUiForeground(foreground: Boolean) {
+        if (foreground) {
+            fullExitRequested = false
+        }
         uiForeground.value = foreground
+    }
+
+    fun prepareForFullExit() {
+        fullExitRequested = true
+        uiForeground.value = false
+        BleForegroundService.stop(this)
     }
 
     fun shouldKeepBackgroundBleRuntime(): Boolean {
@@ -50,8 +81,10 @@ class WildApplication : Application() {
     }
 
     fun shouldPreserveBleWorkAcrossUiExit(): Boolean {
-        return bleManager.isScanning.value ||
-            bleManager.sessions.value.values.any(::shouldKeepBleRuntimeAlive)
+        return !fullExitRequested && (
+            bleManager.isScanning.value ||
+                bleManager.sessions.value.values.any(::shouldKeepBleRuntimeAlive)
+            )
     }
 
     private fun shouldKeepBleRuntimeAlive(session: DeviceSessionUiState): Boolean {

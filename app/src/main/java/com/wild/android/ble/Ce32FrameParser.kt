@@ -2,6 +2,8 @@ package com.wild.android.ble
 
 class Ce32FrameParser(
     private val onOutOfFrameBytes: (ByteArray) -> Unit = {},
+    /** Resolves dynamic-length CE64 replies (currently scheduler response 0xD8). */
+    private val payloadLengthResolver: (commandId: Int) -> Int? = { null },
     private val onFrame: (commandId: Int, payload: ByteArray) -> Unit,
 ) {
     private enum class ParseMode {
@@ -124,7 +126,7 @@ class Ce32FrameParser(
         zeroPayloadMode: ParseMode,
     ): Boolean {
         commandId = value
-        expectedPayloadLength = Ce32Protocol.payloadLengthFor(value) ?: -1
+        expectedPayloadLength = payloadLengthResolver(value) ?: Ce32Protocol.payloadLengthFor(value) ?: -1
         if (expectedPayloadLength < 0) {
             resetParserState()
             return false

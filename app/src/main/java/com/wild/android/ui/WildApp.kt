@@ -4,20 +4,23 @@ import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.util.Log
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -26,6 +29,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
+
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -38,6 +42,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -46,6 +51,7 @@ import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.ShowChart
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.ArrowDropDown
+import androidx.compose.material.icons.outlined.Cloud
 import androidx.compose.material.icons.outlined.FiberManualRecord
 import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.FilterAlt
@@ -77,10 +83,12 @@ import androidx.compose.material3.OutlinedIconButton
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -90,6 +98,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
@@ -101,18 +110,26 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.wild.android.WildUiState
 import com.wild.android.WildViewModel
+import com.wild.android.R
 import com.wild.android.ble.BleHostSessionState
+import com.wild.android.ble.BleOtaPhase
 import com.wild.android.ble.BleLinkStatsUiState
+import com.wild.android.ble.AdvertisementStatusSampleUiState
+import com.wild.android.ble.Ce64AdvertisementStatus
 import com.wild.android.ble.Ce32Protocol
 import com.wild.android.ble.ControlScope
 import com.wild.android.ble.DeviceSessionUiState
@@ -120,8 +137,16 @@ import com.wild.android.ble.GpioMode
 import com.wild.android.ble.ImpedanceSnapshotUiState
 import com.wild.android.ble.LiveSyncUiState
 import com.wild.android.ble.PreviewSelection
+import com.wild.android.ble.SchedulerRuleUiState
 import com.wild.android.ble.SessionEventUiState
+import com.wild.android.ble.SpectrumConfigUiState
+import com.wild.android.ble.SpectrumSnapshotUiState
+import com.wild.android.ble.SpikeDetectorConfigUiState
 import com.wild.android.ble.SyncMetricUiState
+import com.wild.android.ble.staleDiscoveryDeviceIds
+import com.wild.android.cloud.CloudFleetGatewayState
+import com.wild.android.cloud.CloudFleetPhase
+import com.wild.android.cloud.RemoteFleetDeviceUiState
 import com.wild.android.resolvePreviewRouteSessions
 import com.wild.android.resolvePreviewRouteTargetIds
 import java.time.Instant
@@ -136,7 +161,7 @@ import kotlin.math.roundToLong
 
 private const val SHOW_UI_DESCRIPTIONS = false
 private const val PreviewHighPassCutoffHz = 0.7f
-private const val PreviewDefaultSampleRateHz = 625
+private const val PreviewDefaultSampleRateHz = 1250
 private const val PreviewPacketSampleCount = 64
 private const val PreviewMaxDisplaySampleRateHz = 5_000
 
@@ -150,6 +175,7 @@ private enum class AppDestination(
     val showInDock: Boolean = true,
 ) {
     Devices("Devices", Icons.Outlined.Memory),
+    Remote("Cloud fleet", Icons.Outlined.Cloud, showInDock = false),
     Rssi("RSSI", Icons.Outlined.SettingsInputAntenna, showInDock = false),
     Preview("Preview", Icons.AutoMirrored.Outlined.ShowChart, showInDock = false),
     Live("Live", Icons.Outlined.SettingsInputAntenna, showInDock = false),
@@ -162,6 +188,7 @@ private enum class ControlSection(
 ) {
     Acquisition("Acquisition"),
     ClosedLoop("Closed-Loop"),
+    Analysis("Signal tools"),
     Io("I/O"),
     System("System"),
 }
@@ -182,6 +209,14 @@ private enum class ClosedLoopPane(
     Profile("Profile"),
     Advanced("Advanced"),
     Monitor("Monitor"),
+}
+
+private enum class AnalysisPane(
+    val label: String,
+) {
+    Spike("Spike"),
+    Spectrum("Spectrum"),
+    Schedule("Schedule"),
 }
 
 private enum class SystemPane(
@@ -339,6 +374,19 @@ private enum class RssiWindowPreset(
     FiveMinutes(300_000L, "5m"),
 }
 
+private enum class RssiMonitorMode(
+    val label: String,
+) {
+    Locate("RSSI overview"),
+    Advertisement("Advertisement state"),
+}
+
+private data class AdvertisementStatePlotRow(
+    val label: String,
+    val color: Color,
+    val isActive: (AdvertisementStatusSampleUiState) -> Boolean,
+)
+
 private data class SignalDisplayConfig(
     val window: SignalWindowPreset,
     val gain: SignalGainPreset,
@@ -383,6 +431,8 @@ private data class LiveActionSummary(
     val previewStartCount: Int,
     val previewStopCount: Int,
     val recordingStartCount: Int,
+    val recordingActiveCount: Int,
+    val recordingStopPendingCount: Int,
     val recordingStopCount: Int,
     val canRunPreviewGroupResync: Boolean,
     val previewStartBlockedByScope: Boolean,
@@ -399,6 +449,9 @@ private data class LiveActionSummary(
 
     val canStopRecording: Boolean
         get() = recordingStopCount > 0
+
+    val hasPendingRecordingStop: Boolean
+        get() = recordingStopPendingCount > 0
 }
 
 private data class PendingConfirmAction(
@@ -427,8 +480,14 @@ fun WildApp(
     debugDestinationOverride: String? = null,
     debugDestinationToken: Int = 0,
     onDebugDestinationConsumed: () -> Unit = {},
+    onExitApp: () -> Unit = {},
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val bleOtaPackagePicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        uri?.let(viewModel::selectBleOtaPackage)
+    }
     var destination by rememberSaveable { mutableStateOf(AppDestination.Devices) }
     var controlReturnDestinationName by rememberSaveable { mutableStateOf(AppDestination.Devices.name) }
     var previewReturnDestinationName by rememberSaveable { mutableStateOf(AppDestination.Control.name) }
@@ -448,6 +507,7 @@ fun WildApp(
     val immersivePreview = destination == AppDestination.Preview
     val compactRouteChrome = destination == AppDestination.Preview || destination == AppDestination.Live
     val ultraCompactPreviewChrome = destination == AppDestination.Preview
+    val isLandscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
 
     LaunchedEffect(debugDestinationToken, debugDestinationOverride) {
         val target = debugDestinationOverride
@@ -458,6 +518,7 @@ fun WildApp(
             entry.name.equals(target, ignoreCase = true)
         } ?: return@LaunchedEffect
         when (destinationOverride) {
+            AppDestination.Remote -> Unit
             AppDestination.Rssi -> Unit
             AppDestination.Preview -> previewReturnDestinationName = AppDestination.Devices.name
             AppDestination.Live -> liveReturnDestinationName = AppDestination.Devices.name
@@ -471,6 +532,7 @@ fun WildApp(
 
     BackHandler(enabled = destination != AppDestination.Devices) {
         destination = when (destination) {
+            AppDestination.Remote -> AppDestination.Devices
             AppDestination.Rssi -> AppDestination.Devices
             AppDestination.Live -> liveReturnDestination
             AppDestination.Records -> recordsReturnDestination
@@ -499,7 +561,7 @@ fun WildApp(
             Column(
                 modifier = Modifier
                     .fillMaxSize()
-                    .statusBarsPadding()
+                    .then(if (isLandscape) Modifier else Modifier.statusBarsPadding())
                     .padding(padding)
                     .padding(
                         horizontal = when {
@@ -536,20 +598,19 @@ fun WildApp(
                             onScanToggle = {
                                 if (uiState.isScanning) viewModel.stopScan() else viewModel.startScan()
                             },
-                            onScopeChange = viewModel::setControlScope,
                             onConnectVisible = viewModel::connectVisibleSessions,
-                            onConnect = viewModel::connect,
                             onConnectQueued = viewModel::connectQueuedCandidates,
                             onCancelPendingFleetConnect = viewModel::cancelPendingFleetConnect,
-                            onTogglePendingConnection = viewModel::togglePendingConnection,
-                            onActivate = viewModel::setActiveSession,
+                            onDisconnectAll = viewModel::disconnectAllConnected,
+                            onDisconnectSession = viewModel::disconnect,
                             onStopAllRecording = { sessionIds ->
                                 viewModel.stopRecordingForTargets(sessionIds)
                             },
+                            onConnectSession = viewModel::connect,
+                            onFocusSession = viewModel::focusSession,
                             onOpenControlPage = { deviceId ->
                                 viewModel.setActiveSession(deviceId)
                                 viewModel.setControlScope(ControlScope.ActiveDevice)
-                                viewModel.prepareControlLaunchForDevice(deviceId)
                                 controlReturnDestinationName = AppDestination.Devices.name
                                 controlLaunchSectionName = ControlSection.Acquisition.name
                                 controlLaunchClosedLoopPaneName = ClosedLoopPane.Quick.name
@@ -558,13 +619,27 @@ fun WildApp(
                                 destination = AppDestination.Control
                             },
                             onOpenScopePreview = {
-                                viewModel.setControlScope(ControlScope.AllConnected)
                                 previewReturnDestinationName = AppDestination.Devices.name
                                 destination = AppDestination.Preview
                             },
                             onOpenRssiMonitor = {
                                 destination = AppDestination.Rssi
                             },
+                            onOpenCloudFleet = {
+                                destination = AppDestination.Remote
+                            },
+                            onClearStaleDevices = viewModel::clearStaleDevices,
+                            onExitApp = onExitApp,
+                        )
+
+                        AppDestination.Remote -> CloudFleetScreen(
+                            modifier = Modifier.fillMaxSize(),
+                            cloudFleet = uiState.cloudFleet,
+                            onBack = { destination = AppDestination.Devices },
+                            onSignIn = viewModel::signInToCloudFleet,
+                            onCreateAccount = viewModel::createCloudFleetAccount,
+                            onSignOut = viewModel::signOutOfCloudFleet,
+                            onCloudFleetViewVisible = viewModel::setCloudFleetViewVisible,
                         )
 
                         AppDestination.Rssi -> RssiMonitorScreen(
@@ -580,7 +655,14 @@ fun WildApp(
                             uiState = uiState,
                             onActivateSession = viewModel::setActiveSession,
                             onOpenDevices = { destination = AppDestination.Devices },
-                            onResync = { viewModel.requestResync() },
+                            onOpenOperate = {
+                                controlReturnDestinationName = AppDestination.Preview.name
+                                controlLaunchSectionName = ControlSection.Acquisition.name
+                                controlLaunchClosedLoopPaneName = ClosedLoopPane.Quick.name
+                                controlLaunchSystemPaneName = SystemPane.Push.name
+                                controlLaunchRequestToken += 1
+                                destination = AppDestination.Control
+                            },
                             onStartPreview = viewModel::startPreviewForTargets,
                             onStopPreview = viewModel::stopPreviewForTargets,
                             onStartRecording = viewModel::startRecordingForTargets,
@@ -659,11 +741,6 @@ fun WildApp(
                                 previewReturnDestinationName = AppDestination.Control.name
                                 destination = AppDestination.Preview
                             },
-                            onOpenLive = {
-                                liveReturnDestinationName = AppDestination.Control.name
-                                viewModel.prepareLiveLaunchForCurrentScope()
-                                destination = AppDestination.Live
-                            },
                             onActivateSession = viewModel::setActiveSession,
                             onScopeChange = viewModel::setControlScope,
                             onToggleSessionSelection = viewModel::toggleSessionSelection,
@@ -679,7 +756,6 @@ fun WildApp(
                                 }
                             },
                             onResync = { viewModel.requestResync() },
-                            onResyncNoRtc = { viewModel.requestResync(suppressRtcWrite = true) },
                             onReadParams = viewModel::requestSystemParams,
                             onReadDsp = viewModel::requestDspParams,
                             onReadAllParams = viewModel::requestAllParams,
@@ -713,10 +789,27 @@ fun WildApp(
                             onReset = viewModel::requestSoftwareReset,
                             onBootloader = viewModel::requestBootloader,
                             onFirmwareUpdate = viewModel::requestFirmwareUpdate,
+                            onPickBleOtaPackage = {
+                                bleOtaPackagePicker.launch(arrayOf("text/plain", "application/octet-stream", "application/*"))
+                            },
+                            onStageBleOta = viewModel::stageBleOta,
+                            onInstallStagedBleOta = viewModel::installStagedBleOta,
+                            onRequestAiModuleInstall = viewModel::requestAiModuleInstall,
+                            onRefreshAiStatus = viewModel::refreshAiRuntimeStatus,
+                            onSelectAiModule = viewModel::selectAiModule,
+                            onSetAiRuntimeEnabled = viewModel::setAiRuntimeEnabled,
                             onUploadSystemParams = viewModel::uploadSystemParams,
                             onUploadDspParams = viewModel::uploadDspParams,
                             onUploadAllParams = viewModel::uploadAllParams,
                             onRole = viewModel::setRole,
+                            onRefreshSignalAnalysis = viewModel::refreshSignalAnalysis,
+                            onSetSpikeDetectorConfig = viewModel::setSpikeDetectorConfig,
+                            onSetSpectrumConfig = viewModel::setSpectrumConfig,
+                            onSetSchedulerEnabled = viewModel::setSchedulerEnabled,
+                            onSetSchedulerRule = viewModel::setSchedulerRule,
+                            onSetSchedulerRuleEnabled = viewModel::setSchedulerRuleEnabled,
+                            onClearSchedulerRule = viewModel::clearSchedulerRule,
+                            onClearScheduler = viewModel::clearScheduler,
                         )
 
                         AppDestination.Records -> RecordsScreen(
@@ -856,70 +949,26 @@ private fun StatusBanner(
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
-@Composable
-private fun DeviceControlHomeCard(
-    sessions: List<DeviceSessionUiState>,
-    selectedDeviceId: String?,
-    pendingConnectionIds: List<String>,
-    onSelectDevice: (String) -> Unit,
-    onTogglePendingConnection: (String) -> Unit,
-) {
-    val selectedSessionId = sessions.firstOrNull { it.id == selectedDeviceId }?.id ?: sessions.firstOrNull()?.id
-    if (sessions.isEmpty()) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(vertical = 56.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Icon(
-                imageVector = Icons.Outlined.SettingsInputAntenna,
-                contentDescription = null,
-                modifier = Modifier.size(30.dp),
-                tint = MaterialTheme.colorScheme.primary,
-            )
-            Text("Looking for CE devices", style = MaterialTheme.typography.titleSmall)
-        }
-        return
-    }
-
-    Column(
-        modifier = Modifier.fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        sessions.forEach { session ->
-            DeviceControlSessionTab(
-                session = session,
-                selected = session.id == selectedSessionId,
-                queued = session.id in pendingConnectionIds,
-                canQueue = session.bulkConnectEligible && !session.isConnected && !session.isLinkingLike,
-                onClick = { onSelectDevice(session.id) },
-                onToggleQueue = { onTogglePendingConnection(session.id) },
-            )
-        }
-    }
-}
-
 @Composable
 private fun DevicesScreen(
     modifier: Modifier = Modifier,
     uiState: WildUiState,
     onScanToggle: () -> Unit,
-    onScopeChange: (ControlScope) -> Unit,
     onConnectVisible: (List<String>) -> Unit,
-    onConnect: (String) -> Unit,
     onConnectQueued: () -> Unit,
     onCancelPendingFleetConnect: () -> Unit,
-    onTogglePendingConnection: (String) -> Unit,
-    onActivate: (String) -> Unit,
+    onDisconnectAll: () -> Unit,
+    onDisconnectSession: (String) -> Unit,
     onStopAllRecording: (List<String>) -> Unit,
+    onConnectSession: (String) -> Unit,
+    onFocusSession: (String) -> Unit,
     onOpenControlPage: (String) -> Unit,
     onOpenScopePreview: () -> Unit,
     onOpenRssiMonitor: () -> Unit,
+    onOpenCloudFleet: () -> Unit,
+    onClearStaleDevices: () -> Unit,
+    onExitApp: () -> Unit,
 ) {
-    var selectedDeviceTabId by rememberSaveable { mutableStateOf<String?>(uiState.activeSessionId) }
     val discoveredSessions = uiState.sessions
         .sortedWith(
             compareByDescending<DeviceSessionUiState> { it.isActive }
@@ -930,27 +979,14 @@ private fun DevicesScreen(
     )
     val connectableSessions = discoveredSessions.filter { !it.isConnected && !it.isLinkingLike && it.bulkConnectEligible }
     val connectedCount = uiState.connectedSessions.size
+    val linkingCount = discoveredSessions.count { it.isLinkingLike }
+    val disconnectableCount = connectedCount + linkingCount
     val recordingSessions = uiState.connectedSessions.filter { it.isRecordingLike }
+    val staleDeviceCount = staleDiscoveryDeviceIds(discoveredSessions).size
     val attentionCount = discoveredSessions.count { session ->
         session.lastFailure.isNotBlank() ||
             session.hostState == BleHostSessionState.Reconnecting
     }
-    LaunchedEffect(uiState.activeSessionId, discoveredSessions.map { it.id }) {
-        selectedDeviceTabId = when {
-            uiState.activeSessionId != null -> uiState.activeSessionId
-            discoveredSessions.any { it.id == selectedDeviceTabId } -> selectedDeviceTabId
-            else -> discoveredSessions.firstOrNull()?.id
-        }
-    }
-    val selectedDevice = discoveredSessions.firstOrNull { it.id == selectedDeviceTabId } ?: discoveredSessions.firstOrNull()
-    LaunchedEffect(selectedDevice?.id) {
-        selectedDevice?.id?.let { deviceId ->
-            if (uiState.activeSessionId != deviceId) {
-                onActivate(deviceId)
-            }
-        }
-    }
-
     Column(modifier = modifier.fillMaxSize()) {
         LazyColumn(
             modifier = Modifier.weight(1f),
@@ -961,6 +997,7 @@ private fun DevicesScreen(
                     isScanning = uiState.isScanning,
                     onScanToggle = onScanToggle,
                     onOpenRssiMonitor = onOpenRssiMonitor,
+                    onOpenCloudFleet = onOpenCloudFleet,
                 )
             }
             item {
@@ -973,26 +1010,20 @@ private fun DevicesScreen(
                 )
             }
             item {
-                DeviceControlHomeCard(
+                AdvertisementFleetOverview(
                     sessions = discoveredSessions,
-                    selectedDeviceId = selectedDevice?.id,
-                    pendingConnectionIds = uiState.pendingConnectionIds,
-                    onSelectDevice = { deviceId ->
-                        selectedDeviceTabId = deviceId
-                        onActivate(deviceId)
-                        onScopeChange(ControlScope.ActiveDevice)
-                        discoveredSessions.firstOrNull { it.id == deviceId }?.let { session ->
-                            Log.d(
-                                "DevicesScreen",
-                                "selectDevice id=$deviceId hostState=${session.hostState} connected=${session.isConnected} linking=${session.isLinkingLike}",
-                            )
-                            if (!session.isConnected && !session.isLinkingLike) {
-                                onConnect(session.id)
-                            }
-                            onOpenControlPage(session.id)
-                        }
-                    },
-                    onTogglePendingConnection = onTogglePendingConnection,
+                    isScanning = uiState.isScanning,
+                    onConnectSession = onConnectSession,
+                    onDisconnectSession = onDisconnectSession,
+                    onFocusSession = onFocusSession,
+                    onOpenControlPage = onOpenControlPage,
+                )
+            }
+            item {
+                DeviceListMaintenanceCard(
+                    staleDeviceCount = staleDeviceCount,
+                    onClearStaleDevices = onClearStaleDevices,
+                    onExitApp = onExitApp,
                 )
             }
         }
@@ -1002,13 +1033,410 @@ private fun DevicesScreen(
             queuedCount = uiState.pendingConnectionIds.size,
             fleetConnectActive = uiState.fleetConnectActive,
             connectedCount = connectedCount,
+            disconnectableCount = disconnectableCount,
             recordingSessionIds = recordingSessions.map { it.id },
             onConnectAll = { onConnectVisible(connectableSessions.map { it.id }) },
             onConnectQueued = onConnectQueued,
             onCancelPendingFleetConnect = onCancelPendingFleetConnect,
+            onDisconnectAll = onDisconnectAll,
             onOpenPreview = onOpenScopePreview,
             onStopAllRecording = onStopAllRecording,
+            onExitApp = onExitApp,
         )
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun DeviceListMaintenanceCard(
+    staleDeviceCount: Int,
+    onClearStaleDevices: () -> Unit,
+    onExitApp: () -> Unit,
+) {
+    var showExitConfirmation by rememberSaveable { mutableStateOf(false) }
+    Surface(
+        shape = RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.62f),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text("Device list", style = MaterialTheme.typography.titleSmall)
+            Text(
+                "Clear removes only disconnected devices not heard for 30 minutes. Connected or linking devices stay protected.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.66f),
+            )
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                OutlinedButton(
+                    onClick = onClearStaleDevices,
+                    enabled = staleDeviceCount > 0,
+                    modifier = Modifier.heightIn(min = 48.dp),
+                ) {
+                    Text(if (staleDeviceCount > 0) "Clear stale devices ($staleDeviceCount)" else "No stale devices")
+                }
+                TextButton(
+                    onClick = { showExitConfirmation = true },
+                    modifier = Modifier.heightIn(min = 48.dp),
+                ) {
+                    Text("Exit app")
+                }
+            }
+        }
+    }
+
+    if (showExitConfirmation) {
+        AlertDialog(
+            onDismissRequest = { showExitConfirmation = false },
+            title = { Text("Exit WILD Control Panel?") },
+            text = {
+                Text(
+                    "This stops Bluetooth scanning, closes all WILD links, and removes the background BLE notification. Device recordings continue unless you stop them first.",
+                )
+            },
+            confirmButton = {
+                Button(onClick = onExitApp) { Text("Exit app") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showExitConfirmation = false }) { Text("Keep running") }
+            },
+        )
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun CloudFleetScreen(
+    modifier: Modifier = Modifier,
+    cloudFleet: CloudFleetGatewayState,
+    onBack: () -> Unit,
+    onSignIn: (String, String) -> Unit,
+    onCreateAccount: (String, String) -> Unit,
+    onSignOut: () -> Unit,
+    onCloudFleetViewVisible: (Boolean) -> Unit,
+) {
+    var email by rememberSaveable { mutableStateOf("") }
+    var password by rememberSaveable { mutableStateOf("") }
+    val signingIn = cloudFleet.phase == CloudFleetPhase.SigningIn
+    val remoteDevices = cloudFleet.remoteDevices
+    val connectedCount = remoteDevices.count { it.connected }
+    val recordingCount = remoteDevices.count { it.recording }
+
+    DisposableEffect(Unit) {
+        onCloudFleetViewVisible(true)
+        onDispose { onCloudFleetViewVisible(false) }
+    }
+
+    Column(
+        modifier = modifier
+            .verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            OutlinedIconButton(
+                onClick = onBack,
+                modifier = Modifier.size(48.dp),
+            ) {
+                Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "Back to devices")
+            }
+            Spacer(Modifier.width(10.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text("Cloud fleet", style = MaterialTheme.typography.headlineSmall)
+                Text(
+                    "View status from another WILD phone. Remote BLE commands are disabled.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.64f),
+                )
+            }
+        }
+
+        Surface(
+            shape = RoundedCornerShape(20.dp),
+            color = when (cloudFleet.phase) {
+                CloudFleetPhase.Online -> Color(0xFF2BA66B).copy(alpha = 0.12f)
+                CloudFleetPhase.SigningIn -> MaterialTheme.colorScheme.primaryContainer
+                CloudFleetPhase.NeedsSetup -> MaterialTheme.colorScheme.errorContainer
+                CloudFleetPhase.Guest -> MaterialTheme.colorScheme.surfaceVariant
+            },
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Outlined.Cloud,
+                        contentDescription = null,
+                        tint = cloudFleetStatusColor(cloudFleet.phase),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        cloudFleetStatusTitle(cloudFleet),
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                }
+                Text(
+                    cloudFleet.message,
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                cloudFleet.lastPublishedAtMs?.let { publishedAtMs ->
+                    Text(
+                        "Last phone update ${formatCloudAge(publishedAtMs)}",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.62f),
+                    )
+                }
+            }
+        }
+
+        if (cloudFleet.sharedAcrossPhones) {
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.62f),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Row(
+                    modifier = Modifier.padding(14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Shared account", style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            cloudFleet.accountEmail ?: "Firebase account",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.64f),
+                        )
+                    }
+                    TextButton(onClick = onSignOut) {
+                        Text("Sign out")
+                    }
+                }
+            }
+        } else {
+            Surface(
+                shape = RoundedCornerShape(20.dp),
+                color = MaterialTheme.colorScheme.surface,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Text("Share this fleet", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "Use the same Firebase email/password on the gateway and viewing phones. " +
+                            "Guest status remains private to one phone.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.64f),
+                    )
+                    OutlinedTextField(
+                        value = email,
+                        onValueChange = { email = it },
+                        label = { Text("Email") },
+                        singleLine = true,
+                        enabled = !signingIn,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    OutlinedTextField(
+                        value = password,
+                        onValueChange = { password = it },
+                        label = { Text("Password") },
+                        singleLine = true,
+                        enabled = !signingIn,
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Button(
+                            onClick = { onSignIn(email, password) },
+                            enabled = !signingIn,
+                            modifier = Modifier.heightIn(min = 48.dp),
+                        ) {
+                            Text(if (signingIn) "Connecting…" else "Sign in")
+                        }
+                        OutlinedButton(
+                            onClick = { onCreateAccount(email, password) },
+                            enabled = !signingIn,
+                            modifier = Modifier.heightIn(min = 48.dp),
+                        ) {
+                            Text("Create shared account")
+                        }
+                    }
+                }
+            }
+        }
+
+        Surface(
+            shape = RoundedCornerShape(20.dp),
+            color = MaterialTheme.colorScheme.surface,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Remote device status", style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            "Latest status published by gateway phones on this account.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.64f),
+                        )
+                    }
+                    DeviceDashboardMetricChip(
+                        text = "$connectedCount linked",
+                        color = if (connectedCount > 0) Color(0xFF2BA66B) else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    if (recordingCount > 0) {
+                        Spacer(Modifier.width(6.dp))
+                        DeviceDashboardMetricChip(
+                            text = "$recordingCount rec",
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
+                }
+
+                if (remoteDevices.isEmpty()) {
+                    Text(
+                        "No cloud device status yet. Keep the gateway phone online and connected to a WILD device.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.64f),
+                    )
+                } else {
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        remoteDevices.forEach { device ->
+                            RemoteFleetDeviceCard(device)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun RemoteFleetDeviceCard(device: RemoteFleetDeviceUiState) {
+    val statusColor = when {
+        device.recording -> MaterialTheme.colorScheme.error
+        device.previewing -> Color(0xFF1687F2)
+        device.connected -> Color(0xFF2BA66B)
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.54f),
+        modifier = Modifier.widthIn(min = 220.dp, max = 340.dp),
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                device.displayName,
+                style = MaterialTheme.typography.titleSmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                remoteFleetDeviceStateLabel(device),
+                style = MaterialTheme.typography.labelMedium,
+                color = statusColor,
+            )
+            Text(
+                "Gateway: ${device.gatewayLabel}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.68f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                device.rssiDbm?.let { rssi ->
+                    DeviceDashboardMetricChip("$rssi dBm", statusColor)
+                }
+                device.batteryVolts?.let { volts ->
+                    DeviceDashboardMetricChip("Battery ${formatVoltageLabel(volts)}")
+                }
+                device.storageUsedPercent?.let { percent ->
+                    DeviceDashboardMetricChip("Storage $percent%")
+                } ?: device.storageUsedMb?.let { usedMb ->
+                    DeviceDashboardMetricChip("Storage ${formatUsedSpaceLabel(usedMb)}")
+                }
+                if (device.recording && device.recordingSeconds > 0L) {
+                    DeviceDashboardMetricChip("Rec ${formatSeconds(device.recordingSeconds)}", MaterialTheme.colorScheme.error)
+                }
+            }
+            Text(
+                "Gateway update ${formatCloudAge(device.lastPublishedAtMs)}",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.56f),
+            )
+        }
+    }
+}
+
+private fun cloudFleetStatusTitle(cloudFleet: CloudFleetGatewayState): String {
+    return when (cloudFleet.phase) {
+        CloudFleetPhase.Online -> "Cloud fleet online"
+        CloudFleetPhase.Guest -> "Private cloud gateway"
+        CloudFleetPhase.SigningIn -> "Connecting cloud fleet"
+        CloudFleetPhase.NeedsSetup -> "Cloud setup needed"
+    }
+}
+
+@Composable
+private fun cloudFleetStatusColor(phase: CloudFleetPhase): Color {
+    return when (phase) {
+        CloudFleetPhase.Online -> Color(0xFF2BA66B)
+        CloudFleetPhase.SigningIn -> MaterialTheme.colorScheme.primary
+        CloudFleetPhase.NeedsSetup -> MaterialTheme.colorScheme.error
+        CloudFleetPhase.Guest -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+}
+
+private fun remoteFleetDeviceStateLabel(device: RemoteFleetDeviceUiState): String {
+    return when {
+        device.recording -> "Recording"
+        device.previewing -> "Live signal"
+        device.connected -> "Connected"
+        else -> "Last state: ${device.hostState.lowercase().replaceFirstChar { it.uppercase() }}"
+    }
+}
+
+private fun formatCloudAge(timestampMs: Long, nowMs: Long = System.currentTimeMillis()): String {
+    if (timestampMs <= 0L) {
+        return "not received"
+    }
+    val seconds = ((nowMs - timestampMs).coerceAtLeast(0L) / 1_000L)
+    return when {
+        seconds < 5L -> "now"
+        seconds < 60L -> "${seconds}s ago"
+        seconds < 3_600L -> "${seconds / 60L}m ago"
+        else -> "${seconds / 3_600L}h ago"
     }
 }
 
@@ -1017,27 +1445,270 @@ private fun DeviceDashboardHeader(
     isScanning: Boolean,
     onScanToggle: () -> Unit,
     onOpenRssiMonitor: () -> Unit,
+    onOpenCloudFleet: () -> Unit,
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text("CE Control", style = MaterialTheme.typography.headlineSmall)
+        Image(
+            painter = painterResource(R.drawable.wild_logo_mark_v2),
+            contentDescription = "WILD logo",
+            modifier = Modifier.size(42.dp),
+            contentScale = ContentScale.Fit,
+        )
+        Spacer(Modifier.width(10.dp))
+        Text("WILD Control Panel", style = MaterialTheme.typography.headlineSmall)
         Spacer(Modifier.weight(1f))
-        OutlinedIconButton(onClick = onOpenRssiMonitor) {
+        OutlinedButton(
+            onClick = onOpenCloudFleet,
+            modifier = Modifier.heightIn(min = 48.dp),
+        ) {
             Icon(
-                imageVector = Icons.AutoMirrored.Outlined.ShowChart,
-                contentDescription = "RSSI monitor",
+                imageVector = Icons.Outlined.Cloud,
+                contentDescription = null,
                 tint = MaterialTheme.colorScheme.primary,
             )
+            Spacer(Modifier.width(6.dp))
+            Text("Cloud")
         }
         Spacer(Modifier.width(6.dp))
-        OutlinedIconButton(onClick = onScanToggle) {
+        OutlinedButton(
+            onClick = onOpenRssiMonitor,
+            modifier = Modifier.heightIn(min = 48.dp),
+        ) {
+            Icon(
+                imageVector = Icons.AutoMirrored.Outlined.ShowChart,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+            )
+            Spacer(Modifier.width(6.dp))
+            Text("RSSI")
+        }
+        Spacer(Modifier.width(6.dp))
+        Button(
+            onClick = onScanToggle,
+            modifier = Modifier.heightIn(min = 48.dp),
+        ) {
             Icon(
                 imageVector = Icons.Outlined.Sync,
-                contentDescription = if (isScanning) "Stop scan" else "Scan",
-                tint = if (isScanning) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                contentDescription = null,
             )
+            Spacer(Modifier.width(6.dp))
+            Text(if (isScanning) "Stop scan" else "Scan")
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun AdvertisementFleetOverview(
+    sessions: List<DeviceSessionUiState>,
+    isScanning: Boolean,
+    onConnectSession: (String) -> Unit,
+    onDisconnectSession: (String) -> Unit,
+    onFocusSession: (String) -> Unit,
+    onOpenControlPage: (String) -> Unit,
+) {
+    Surface(
+        shape = RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.surface,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Advertisement overview", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        text = if (isScanning) {
+                            "Connect a device, then open its controls when linked"
+                        } else {
+                            "Scan is paused — showing the last advertisements heard"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.62f),
+                    )
+                }
+                DeviceDashboardMetricChip(
+                    text = "${sessions.size} heard",
+                    color = if (isScanning) Color(0xFF2BA66B) else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
+            if (sessions.isEmpty()) {
+                Text(
+                    text = "No WILD devices heard yet.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.64f),
+                )
+            } else {
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    sessions.forEach { session ->
+                        AdvertisementStatusTile(
+                            session = session,
+                            onConnectSession = { onConnectSession(session.id) },
+                            onDisconnectSession = { onDisconnectSession(session.id) },
+                            onFocusSession = { onFocusSession(session.id) },
+                            onOpenControlPage = { onOpenControlPage(session.id) },
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun AdvertisementStatusTile(
+    session: DeviceSessionUiState,
+    onConnectSession: () -> Unit,
+    onDisconnectSession: () -> Unit,
+    onFocusSession: () -> Unit,
+    onOpenControlPage: () -> Unit,
+) {
+    val stateColor = deviceDashboardStatusColor(session)
+    val roleIdentity = formatBleRoleIdentity(session.roleTag, session.functionTag)
+    val batteryLabel = formatConnectedBatteryLabel(session)
+    val advertisedStatus = session.advertisedHealthStatus
+    val liveStorage = formatUsedSpaceLabel(session.usedSpaceMb)
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.54f),
+        modifier = Modifier
+            .widthIn(min = 220.dp, max = 340.dp)
+            .border(
+                width = 1.dp,
+                color = Color(session.traceColorArgb).copy(alpha = 0.38f),
+                shape = RoundedCornerShape(16.dp),
+            ),
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(10.dp)
+                        .background(Color(session.traceColorArgb), CircleShape),
+                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = compactDeviceUiLabel(session.name, session.address),
+                        style = MaterialTheme.typography.titleSmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = advertisementStateLabel(session),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = stateColor,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                DeviceDashboardMetricChip(
+                    text = session.rssi?.let { "$it dBm ${rssiQualityLabel(it)}" } ?: "RSSI --",
+                    color = stateColor,
+                )
+                if (batteryLabel != "Not reported") {
+                    DeviceDashboardMetricChip(text = "Battery $batteryLabel")
+                }
+                advertisedStatus?.storageUsedPercent?.let { percent ->
+                    DeviceDashboardMetricChip(text = "Storage $percent% ad")
+                }
+                if (advertisedStatus?.recording == true && advertisedStatus.recordingSeconds > 0L) {
+                    DeviceDashboardMetricChip(text = "Rec ${formatSeconds(advertisedStatus.recordingSeconds)} ad")
+                }
+                advertisedStatus?.takeIf { it.failedSubsystems != 0 || it.degradedSubsystems != 0 }?.let { status ->
+                    DeviceDashboardMetricChip(
+                        text = advertisementHealthLabel(status),
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+                if (roleIdentity.isNotBlank()) {
+                    DeviceDashboardMetricChip(text = roleIdentity)
+                }
+                if (session.isConnected) {
+                    DeviceDashboardMetricChip(
+                        text = "Storage $liveStorage live",
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
+            }
+            Text(
+                text = advertisementSourceLabel(session),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.56f),
+            )
+            when {
+                session.isConnected -> {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        FilledTonalButton(
+                            onClick = onFocusSession,
+                            modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                        ) {
+                            Text(if (session.isActive) "Focused" else "Focus")
+                        }
+                    }
+                    OutlinedButton(
+                        onClick = onOpenControlPage,
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                    ) {
+                        Text("Open device controls")
+                    }
+                }
+                session.isLinkingLike -> {
+                    OutlinedButton(
+                        onClick = onDisconnectSession,
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                    ) {
+                        Text(
+                            if (session.hostState == BleHostSessionState.Reconnecting) {
+                                "Stop reconnecting"
+                            } else {
+                                "Cancel connection"
+                            },
+                        )
+                    }
+                }
+                session.bulkConnectEligible -> {
+                    Button(
+                        onClick = onConnectSession,
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                    ) {
+                        Text("Connect this device")
+                    }
+                }
+                else -> {
+                    Text(
+                        text = "Advertisement only — not eligible for a WILD connection.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.56f),
+                    )
+                }
+            }
         }
     }
 }
@@ -1068,7 +1739,10 @@ private fun DeviceDashboardSummaryCard(
             DeviceDashboardSummaryItem(
                 icon = Icons.Outlined.Sync,
                 value = connectedCount.toString(),
-                label = "Ready",
+                // A GATT connection can exist before the CE handshake has
+                // completed, so this must not imply that the device is ready
+                // for an acquisition command.
+                label = "Connected",
                 color = if (connectedCount > 0) Color(0xFF2BA66B) else MaterialTheme.colorScheme.onSurfaceVariant,
             )
             DeviceDashboardSummaryItem(
@@ -1123,40 +1797,120 @@ private fun DeviceDashboardActionBar(
     queuedCount: Int,
     fleetConnectActive: Boolean,
     connectedCount: Int,
+    disconnectableCount: Int,
     recordingSessionIds: List<String>,
     onConnectAll: () -> Unit,
     onConnectQueued: () -> Unit,
     onCancelPendingFleetConnect: () -> Unit,
+    onDisconnectAll: () -> Unit,
     onOpenPreview: () -> Unit,
     onStopAllRecording: (List<String>) -> Unit,
+    onExitApp: () -> Unit,
 ) {
+    val connectionActionLabel = when {
+        fleetConnectActive -> "Stop queue"
+        queuedCount > 0 -> "Connect queue ($queuedCount)"
+        connectableCount > 0 -> "Connect verified ($connectableCount)"
+        else -> null
+    }
+    val onConnectionAction: (() -> Unit)? = when {
+        fleetConnectActive -> onCancelPendingFleetConnect
+        queuedCount > 0 -> onConnectQueued
+        connectableCount > 0 -> onConnectAll
+        else -> null
+    }
+    val isLandscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
+    var showExitConfirmation by rememberSaveable { mutableStateOf(false) }
     Surface(
         color = MaterialTheme.colorScheme.surfaceVariant,
         modifier = Modifier
             .fillMaxWidth()
             .padding(top = 10.dp),
     ) {
-        FlowRow(
-            modifier = Modifier.padding(10.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            when {
-                fleetConnectActive -> Button(onClick = onCancelPendingFleetConnect) {
-                    Text("Stop queue")
+        if (isLandscape) {
+            Row(
+                modifier = Modifier.padding(10.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                connectionActionLabel?.let { label ->
+                    Button(
+                        onClick = onConnectionAction ?: {},
+                        modifier = Modifier.weight(1.25f).heightIn(min = 50.dp),
+                    ) {
+                        Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
                 }
-                queuedCount > 0 -> Button(onClick = onConnectQueued) {
-                    Text("Connect $queuedCount")
+                FilledTonalButton(
+                    onClick = onOpenPreview,
+                    modifier = Modifier.weight(1f).heightIn(min = 50.dp),
+                    enabled = connectedCount > 0,
+                ) {
+                    Text("Live signals", maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
-                connectableCount > 0 -> Button(onClick = onConnectAll) {
-                    Text("Connect all")
+                OutlinedButton(
+                    onClick = onDisconnectAll,
+                    modifier = Modifier.weight(1f).heightIn(min = 50.dp),
+                    enabled = disconnectableCount > 0,
+                ) {
+                    Text(
+                        if (disconnectableCount > 0) "Cancel / disconnect ($disconnectableCount)" else "Cancel / disconnect",
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                if (recordingSessionIds.isNotEmpty()) {
+                    Button(
+                        onClick = { onStopAllRecording(recordingSessionIds) },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.error,
+                            contentColor = MaterialTheme.colorScheme.onError,
+                        ),
+                        modifier = Modifier.weight(1f).heightIn(min = 50.dp),
+                    ) {
+                        Text("Stop rec ${recordingSessionIds.size}", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+                TextButton(
+                    onClick = { showExitConfirmation = true },
+                    modifier = Modifier.weight(0.72f).heightIn(min = 50.dp),
+                ) {
+                    Text("Exit app", maxLines = 1)
                 }
             }
-            OutlinedButton(
-                onClick = onOpenPreview,
-                enabled = connectedCount > 0,
+        } else {
+            Column(
+                modifier = Modifier.padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Text("Preview")
+            Text("Fleet actions", style = MaterialTheme.typography.titleSmall)
+            connectionActionLabel?.let { label ->
+                Button(
+                    onClick = onConnectionAction ?: {},
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
+                ) { Text(label) }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                FilledTonalButton(
+                    onClick = onOpenPreview,
+                    modifier = Modifier.weight(1f).heightIn(min = 50.dp),
+                    enabled = connectedCount > 0,
+                ) {
+                    Text("Live\nsignals", textAlign = TextAlign.Center)
+                }
+                OutlinedButton(
+                    onClick = onDisconnectAll,
+                    modifier = Modifier.weight(1f).heightIn(min = 50.dp),
+                    enabled = disconnectableCount > 0,
+                ) {
+                    Text(
+                        if (disconnectableCount > 0) "Cancel / disconnect\nall ($disconnectableCount)" else "Cancel / disconnect\nall",
+                        textAlign = TextAlign.Center,
+                    )
+                }
             }
             if (recordingSessionIds.isNotEmpty()) {
                 Button(
@@ -1165,11 +1919,37 @@ private fun DeviceDashboardActionBar(
                         containerColor = MaterialTheme.colorScheme.error,
                         contentColor = MaterialTheme.colorScheme.onError,
                     ),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
                 ) {
-                    Text("Stop all")
+                    Text("Stop recording on ${recordingSessionIds.size} device${if (recordingSessionIds.size == 1) "" else "s"}")
                 }
             }
+            TextButton(
+                onClick = { showExitConfirmation = true },
+                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+            ) {
+                Text("Exit WILD app — stop Bluetooth")
+            }
+            }
         }
+    }
+
+    if (showExitConfirmation) {
+        AlertDialog(
+            onDismissRequest = { showExitConfirmation = false },
+            title = { Text("Exit WILD Control Panel?") },
+            text = {
+                Text(
+                    "This stops Bluetooth scanning, cancels all connection attempts, closes all WILD links, and removes the background BLE notification. Device recordings continue unless you stop them first.",
+                )
+            },
+            confirmButton = {
+                Button(onClick = onExitApp) { Text("Exit app") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showExitConfirmation = false }) { Text("Keep running") }
+            },
+        )
     }
 }
 
@@ -1183,6 +1963,8 @@ private fun RssiMonitorScreen(
     onBack: () -> Unit,
 ) {
     var window by rememberSaveable { mutableStateOf(RssiWindowPreset.OneMinute) }
+    var modeName by rememberSaveable { mutableStateOf(RssiMonitorMode.Locate.name) }
+    var selectedDeviceId by rememberSaveable { mutableStateOf<String?>(null) }
     var isPaused by rememberSaveable { mutableStateOf(false) }
     var nowMs by rememberSaveable { mutableStateOf(System.currentTimeMillis()) }
     var pausedAtMs by rememberSaveable { mutableStateOf(0L) }
@@ -1192,6 +1974,16 @@ private fun RssiMonitorScreen(
             .thenByDescending { it.isConnected }
             .thenBy { it.name.lowercase(Locale.US) },
     )
+    val mode = RssiMonitorMode.valueOf(modeName)
+    val selectedSession = orderedSessions.firstOrNull { it.id == selectedDeviceId }
+        ?: orderedSessions.firstOrNull { it.isActive }
+        ?: orderedSessions.firstOrNull()
+
+    LaunchedEffect(orderedSessions.map { it.id }, selectedSession?.id) {
+        if (selectedDeviceId != selectedSession?.id) {
+            selectedDeviceId = selectedSession?.id
+        }
+    }
 
     LaunchedEffect(isPaused) {
         while (!isPaused) {
@@ -1238,30 +2030,17 @@ private fun RssiMonitorScreen(
             }
             Spacer(Modifier.width(6.dp))
             OutlinedIconButton(onClick = onClearHistory) {
-                Icon(Icons.Outlined.Remove, contentDescription = "Clear RSSI history")
-            }
-        }
-
-        FlowRow(
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            RssiWindowPreset.entries.forEach { option ->
-                FilterChip(
-                    selected = option == window,
-                    onClick = { window = option },
-                    label = { Text(option.label) },
-                )
+                Icon(Icons.Outlined.Remove, contentDescription = "Clear RSSI and advertisement history")
             }
         }
 
         if (orderedSessions.isEmpty()) {
             Box(
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier.weight(1f).fillMaxWidth(),
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
-                    text = if (isScanning) "Looking for CE devices..." else "No CE devices",
+                    text = if (isScanning) "Looking for WILD devices..." else "No WILD devices",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.64f),
                 )
@@ -1269,18 +2048,274 @@ private fun RssiMonitorScreen(
             return@Column
         }
 
-        RssiTimelineChart(
-            sessions = orderedSessions,
-            nowMs = displayedNowMs,
-            windowMs = window.milliseconds,
-        )
+        selectedSession?.let { session ->
+            Row(
+                modifier = Modifier.weight(1f).fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Column(
+                    modifier = Modifier
+                        .widthIn(min = 240.dp, max = 300.dp)
+                        .fillMaxHeight(),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    if (mode == RssiMonitorMode.Locate) {
+                        RssiDeviceLegend(
+                            sessions = orderedSessions,
+                            modifier = Modifier.height(220.dp),
+                        )
+                    } else {
+                        RssiDeviceSelector(
+                            sessions = orderedSessions,
+                            selectedDeviceId = session.id,
+                            onSelect = { selectedDeviceId = it },
+                        )
+                    }
+                    Text("Display", style = MaterialTheme.typography.labelLarge)
+                    RssiMonitorMode.entries.forEach { option ->
+                        val isSelected = option == mode
+                        if (isSelected) {
+                            Button(
+                                onClick = { modeName = option.name },
+                                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                            ) {
+                                Text(option.label, textAlign = TextAlign.Center)
+                            }
+                        } else {
+                            OutlinedButton(
+                                onClick = { modeName = option.name },
+                                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                            ) {
+                                Text(option.label, textAlign = TextAlign.Center)
+                            }
+                        }
+                    }
+                    Text("History window", style = MaterialTheme.typography.labelLarge)
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        RssiWindowPreset.entries.forEach { option ->
+                            FilterChip(
+                                selected = option == window,
+                                onClick = { window = option },
+                                label = { Text(option.label) },
+                            )
+                        }
+                    }
+                }
 
-        LazyColumn(
-            modifier = Modifier.weight(1f),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+                Column(
+                    modifier = Modifier.fillMaxHeight().weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    when (mode) {
+                        RssiMonitorMode.Locate -> {
+                            RssiFleetSummary(orderedSessions)
+                            RssiTimelineChart(
+                                sessions = orderedSessions,
+                                nowMs = displayedNowMs,
+                                windowMs = window.milliseconds,
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
+
+                        RssiMonitorMode.Advertisement -> {
+                            AdvertisementStatusSummary(session)
+                            AdvertisementStatusTimelineChart(
+                                session = session,
+                                nowMs = displayedNowMs,
+                                windowMs = window.milliseconds,
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RssiDeviceLegend(
+    sessions: List<DeviceSessionUiState>,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = RoundedCornerShape(14.dp),
+        modifier = modifier.fillMaxWidth(),
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            items(orderedSessions, key = { it.id }) { session ->
-                RssiMonitorDeviceRow(session)
+            Text("RSSI devices", style = MaterialTheme.typography.titleSmall)
+            Text(
+                text = "Each color matches its trace",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.62f),
+            )
+            LazyColumn(
+                modifier = Modifier.weight(1f).fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                items(sessions, key = { it.id }) { device ->
+                    val traceColor = Color(device.traceColorArgb)
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(10.dp)
+                                .background(traceColor, CircleShape),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = compactDeviceUiLabel(device.name, device.address),
+                            modifier = Modifier.weight(1f),
+                            style = MaterialTheme.typography.labelLarge,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            text = device.rssi?.let { "$it dBm" } ?: "--",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = traceColor,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RssiDeviceSelector(
+    sessions: List<DeviceSessionUiState>,
+    selectedDeviceId: String,
+    onSelect: (String) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val selectedSession = sessions.firstOrNull { it.id == selectedDeviceId } ?: return
+    val selectedColor = Color(selectedSession.traceColorArgb)
+
+    Box(modifier = Modifier.fillMaxWidth()) {
+        Surface(
+            color = MaterialTheme.colorScheme.surfaceVariant,
+            shape = RoundedCornerShape(14.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { expanded = true },
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(10.dp)
+                        .background(selectedColor, CircleShape),
+                )
+                Spacer(Modifier.width(8.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Target device", style = MaterialTheme.typography.labelMedium)
+                    Text(
+                        text = compactDeviceUiLabel(selectedSession.name, selectedSession.address),
+                        style = MaterialTheme.typography.titleSmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = sessionSelectorTelemetryLabel(selectedSession),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.62f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                Icon(Icons.Outlined.ArrowDropDown, contentDescription = "Choose device")
+            }
+        }
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+        ) {
+            sessions.forEach { session ->
+                val traceColor = Color(session.traceColorArgb)
+                DropdownMenuItem(
+                    text = {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                modifier = Modifier
+                                    .size(10.dp)
+                                    .background(traceColor, CircleShape),
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Column {
+                                Text(compactDeviceUiLabel(session.name, session.address))
+                                Text(
+                                    text = sessionSelectorTelemetryLabel(session),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.62f),
+                                )
+                            }
+                        }
+                    },
+                    onClick = {
+                        onSelect(session.id)
+                        expanded = false
+                    },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun RssiFleetSummary(sessions: List<DeviceSessionUiState>) {
+    val strongest = sessions.maxByOrNull { it.rssi ?: Int.MIN_VALUE }
+    Surface(
+        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.46f),
+        shape = RoundedCornerShape(14.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Compare ${sessions.size} nearby device${if (sessions.size == 1) "" else "s"}",
+                    style = MaterialTheme.typography.titleSmall,
+                )
+                Text(
+                    text = "Move with the phone: stronger, less-negative RSSI means closer.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.64f),
+                )
+            }
+            strongest?.let { device ->
+                val traceColor = Color(device.traceColorArgb)
+                Column(horizontalAlignment = Alignment.End) {
+                    Text(
+                        text = "Strongest now",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.64f),
+                    )
+                    Text(
+                        text = device.rssi?.let { "$it dBm" } ?: "--",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = traceColor,
+                    )
+                    Text(
+                        text = compactDeviceUiLabel(device.name, device.address),
+                        style = MaterialTheme.typography.labelSmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
         }
     }
@@ -1291,6 +2326,7 @@ private fun RssiTimelineChart(
     sessions: List<DeviceSessionUiState>,
     nowMs: Long,
     windowMs: Long,
+    modifier: Modifier = Modifier,
 ) {
     val gridColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.22f)
     val labelColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.56f)
@@ -1300,8 +2336,9 @@ private fun RssiTimelineChart(
 
     Box(
         modifier = Modifier
+            .then(modifier)
             .fillMaxWidth()
-            .height(270.dp)
+            .heightIn(min = 170.dp)
             .background(surfaceColor, RoundedCornerShape(14.dp))
             .border(1.dp, gridColor, RoundedCornerShape(14.dp)),
     ) {
@@ -1376,18 +2413,230 @@ private fun RssiTimelineChart(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun RssiMonitorDeviceRow(session: DeviceSessionUiState) {
+private fun AdvertisementStatusSummary(session: DeviceSessionUiState) {
+    val latest = session.advertisementHistory.lastOrNull()
+    val stateLabel = advertisementTimelineStateLabel(latest)
+    val stateColor = advertisementTimelineStateColor(latest)
     Surface(
-        color = MaterialTheme.colorScheme.surfaceVariant,
+        color = stateColor.copy(alpha = 0.10f),
+        shape = RoundedCornerShape(14.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .size(10.dp)
+                        .background(stateColor, CircleShape),
+                )
+                Spacer(Modifier.width(8.dp))
+                Text("Latest advertisement: $stateLabel", style = MaterialTheme.typography.titleSmall)
+                Spacer(Modifier.weight(1f))
+                Text(
+                    text = formatRecentSeenLabel(session),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.62f),
+                )
+            }
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                latest?.voltage?.let { voltage ->
+                    DeviceDashboardMetricChip("Battery ${formatVoltageLabel(voltage)}", stateColor)
+                }
+                latest?.storageUsedPercent?.let { percent ->
+                    DeviceDashboardMetricChip("Storage $percent%")
+                }
+                latest?.recordingSeconds?.takeIf { seconds -> seconds > 0L }?.let { seconds ->
+                    DeviceDashboardMetricChip("Rec ${formatSeconds(seconds)}")
+                }
+                latest?.lastEventCode?.takeIf { eventCode -> eventCode != 0 }?.let { eventCode ->
+                    DeviceDashboardMetricChip("Event 0x${eventCode.toString(16).uppercase(Locale.US)}")
+                }
+            }
+            Text(
+                text = if (latest?.hasStateTelemetry == true) {
+                    "Broadcast state only; this is independent of the phone's BLE connection state."
+                } else {
+                    "No CE64 state payload yet. This device currently advertises RSSI${if (latest?.voltage != null) " and battery" else ""} only."
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.66f),
+            )
+        }
+    }
+}
+
+@Composable
+private fun AdvertisementStatusTimelineChart(
+    session: DeviceSessionUiState,
+    nowMs: Long,
+    windowMs: Long,
+    modifier: Modifier = Modifier,
+) {
+    val gridColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.22f)
+    val labelColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.60f)
+    val surfaceColor = MaterialTheme.colorScheme.surfaceVariant
+    val rows = remember {
+        listOf(
+            AdvertisementStatePlotRow(
+                label = "Recording",
+                color = Color(0xFFD94343),
+                isActive = { sample -> sample.recording == true },
+            ),
+            AdvertisementStatePlotRow(
+                label = "Live signal",
+                color = Color(0xFF1687F2),
+                isActive = { sample -> sample.previewing == true },
+            ),
+            AdvertisementStatePlotRow(
+                label = "Attention",
+                color = Color(0xFFF08A18),
+                isActive = { sample ->
+                    (sample.failedSubsystems ?: 0) != 0 || (sample.degradedSubsystems ?: 0) != 0
+                },
+            ),
+            AdvertisementStatePlotRow(
+                label = "CE64 status",
+                color = Color(0xFF2BA66B),
+                isActive = AdvertisementStatusSampleUiState::hasStateTelemetry,
+            ),
+        )
+    }
+    val visibleSamples = session.advertisementHistory.filter { sample ->
+        sample.timestampMs in (nowMs - windowMs)..nowMs && sample.hasStateTelemetry
+    }
+
+    Box(
+        modifier = Modifier
+            .then(modifier)
+            .fillMaxWidth()
+            .heightIn(min = 170.dp)
+            .background(surfaceColor, RoundedCornerShape(14.dp))
+            .border(1.dp, gridColor, RoundedCornerShape(14.dp)),
+    ) {
+        Canvas(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(start = 88.dp, top = 16.dp, end = 12.dp, bottom = 24.dp),
+        ) {
+            rows.indices.forEach { index ->
+                val y = size.height * (index + 0.5f) / rows.size
+                drawLine(gridColor, Offset(0f, y), Offset(size.width, y), strokeWidth = 1f)
+            }
+            repeat(5) { index ->
+                val fraction = index / 4f
+                val x = size.width * fraction
+                drawLine(gridColor, Offset(x, 0f), Offset(x, size.height), strokeWidth = 1f)
+            }
+
+            rows.forEachIndexed { rowIndex, row ->
+                val rowTop = size.height * rowIndex / rows.size + 5.dp.toPx()
+                val rowHeight = size.height / rows.size - 10.dp.toPx()
+                visibleSamples.forEachIndexed sampleLoop@ { index, sample ->
+                    if (!row.isActive(sample)) {
+                        return@sampleLoop
+                    }
+                    val startFraction = ((sample.timestampMs - (nowMs - windowMs)).toFloat() / windowMs)
+                        .coerceIn(0f, 1f)
+                    val nextTimestampMs = visibleSamples.getOrNull(index + 1)?.timestampMs
+                        ?: (sample.timestampMs + 1_000L).coerceAtMost(nowMs)
+                    val endFraction = ((nextTimestampMs - (nowMs - windowMs)).toFloat() / windowMs)
+                        .coerceIn(startFraction, 1f)
+                    val left = size.width * startFraction
+                    val right = maxOf(left + 3.dp.toPx(), size.width * endFraction).coerceAtMost(size.width)
+                    drawRect(
+                        color = row.color.copy(alpha = 0.90f),
+                        topLeft = Offset(left, rowTop),
+                        size = Size((right - left).coerceAtLeast(1f), rowHeight.coerceAtLeast(1f)),
+                    )
+                }
+            }
+        }
+
+        Column(
+            modifier = Modifier
+                .fillMaxHeight()
+                .padding(start = 8.dp, top = 14.dp, bottom = 20.dp)
+                .width(76.dp),
+            verticalArrangement = Arrangement.SpaceEvenly,
+        ) {
+            rows.forEach { row ->
+                Text(row.label, style = MaterialTheme.typography.labelSmall, color = labelColor)
+            }
+        }
+        if (visibleSamples.isEmpty()) {
+            Text(
+                text = "No CE64 state fields in recent advertisements.",
+                modifier = Modifier.align(Alignment.Center),
+                style = MaterialTheme.typography.bodyMedium,
+                color = labelColor,
+            )
+        }
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .align(Alignment.BottomCenter)
+                .padding(start = 90.dp, end = 14.dp, bottom = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Text("-${formatRssiWindow(windowMs)}", style = MaterialTheme.typography.labelSmall, color = labelColor)
+            Text("now", style = MaterialTheme.typography.labelSmall, color = labelColor)
+        }
+    }
+}
+
+private fun advertisementTimelineStateLabel(sample: AdvertisementStatusSampleUiState?): String {
+    return when {
+        sample == null -> "No state payload"
+        !sample.hasStateTelemetry -> "Telemetry without state"
+        (sample.failedSubsystems ?: 0) != 0 -> "Fault reported"
+        (sample.degradedSubsystems ?: 0) != 0 -> "Degraded reported"
+        sample.recording == true -> "Recording"
+        sample.previewing == true -> "Live signal"
+        else -> "Idle / ready"
+    }
+}
+
+private fun advertisementTimelineStateColor(sample: AdvertisementStatusSampleUiState?): Color {
+    return when {
+        sample == null -> Color(0xFF7A8494)
+        (sample.failedSubsystems ?: 0) != 0 -> Color(0xFFD94343)
+        (sample.degradedSubsystems ?: 0) != 0 -> Color(0xFFF08A18)
+        sample.recording == true -> Color(0xFFD94343)
+        sample.previewing == true -> Color(0xFF1687F2)
+        sample.hasStateTelemetry -> Color(0xFF2BA66B)
+        else -> Color(0xFF7A8494)
+    }
+}
+
+@Composable
+private fun RssiMonitorDeviceRow(
+    session: DeviceSessionUiState,
+    selected: Boolean,
+    onSelect: () -> Unit,
+) {
+    Surface(
+        color = if (selected) {
+            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.52f)
+        } else {
+            MaterialTheme.colorScheme.surfaceVariant
+        },
         shape = RoundedCornerShape(12.dp),
         modifier = Modifier
             .fillMaxWidth()
             .border(
-                width = 1.dp,
-                color = Color(session.traceColorArgb).copy(alpha = 0.38f),
+                width = if (selected) 2.dp else 1.dp,
+                color = if (selected) MaterialTheme.colorScheme.primary else Color(session.traceColorArgb).copy(alpha = 0.38f),
                 shape = RoundedCornerShape(12.dp),
-            ),
+            )
+            .clickable(onClick = onSelect),
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
@@ -1407,7 +2656,14 @@ private fun RssiMonitorDeviceRow(session: DeviceSessionUiState) {
                     overflow = TextOverflow.Ellipsis,
                 )
                 Text(
-                    text = rssiQualityLabel(session.rssi),
+                    text = buildString {
+                        append(rssiQualityLabel(session.rssi))
+                        val state = advertisementTimelineStateLabel(session.advertisementHistory.lastOrNull())
+                        if (state != "Waiting for advertisement" && state != "Telemetry without state") {
+                            append(" · ")
+                            append(state)
+                        }
+                    },
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.56f),
                 )
@@ -1585,7 +2841,7 @@ private fun PreviewScreen(
     uiState: WildUiState,
     onActivateSession: (String) -> Unit,
     onOpenDevices: () -> Unit,
-    onResync: () -> Unit,
+    onOpenOperate: () -> Unit,
     onStartPreview: (List<String>) -> Unit,
     onStopPreview: (List<String>) -> Unit,
     onStartRecording: (List<String>) -> Unit,
@@ -1613,6 +2869,18 @@ private fun PreviewScreen(
         uiState.activeSession,
     ) {
         resolvePreviewRouteTargetIds(uiState)
+    }
+    val allConnectedTargetIds = remember(uiState.connectedSessions) {
+        uiState.connectedSessions.map { it.id }
+    }
+    val commandScopeLabel = when (uiState.controlScope) {
+        ControlScope.ActiveDevice -> "This device"
+        ControlScope.SelectedDevices -> {
+            "Selected ${previewControlTargetIds.size} device${if (previewControlTargetIds.size == 1) "" else "s"}"
+        }
+        ControlScope.AllConnected -> {
+            "All ${previewControlTargetIds.size} connected"
+        }
     }
     val activeSession = previewSessions.firstOrNull { it.id == uiState.activeSessionId } ?: previewSessions.firstOrNull()
     var signalWindowPresetName by rememberSaveable { mutableStateOf(SignalWindowPreset.TenSeconds.name) }
@@ -1654,9 +2922,12 @@ private fun PreviewScreen(
         SignalPlotCard(
             modifier = Modifier.fillMaxSize(),
             sessions = previewSessions,
+            allConnectedSessions = uiState.connectedSessions,
+            commandScopeLabel = commandScopeLabel,
             activeSessionId = activeSession?.id,
             onActivateSession = onActivateSession,
-            onResync = onResync,
+            onOpenDevices = onOpenDevices,
+            onOpenOperate = onOpenOperate,
             onSetPreviewSelection = onSetPreviewSelectionForDevice,
             displayConfig = displayConfig,
             onWindowChange = { signalWindowPresetName = it.name },
@@ -1667,114 +2938,9 @@ private fun PreviewScreen(
             onStopPreview = { onStopPreview(previewControlTargetIds) },
             onStartRecording = { onStartRecording(previewControlTargetIds) },
             onStopRecording = { onStopRecording(previewControlTargetIds) },
+            onStartAllPreview = { onStartPreview(allConnectedTargetIds) },
+            onStopAllPreview = { onStopPreview(allConnectedTargetIds) },
         )
-    }
-}
-
-@OptIn(ExperimentalLayoutApi::class)
-@Composable
-private fun DeviceControlSessionTab(
-    session: DeviceSessionUiState,
-    selected: Boolean,
-    queued: Boolean,
-    canQueue: Boolean,
-    onClick: () -> Unit,
-    onToggleQueue: () -> Unit,
-) {
-    val batteryLabel = formatBatteryLevelLabel(preferredAdvertisementBattery(session))
-    val stateColor = deviceDashboardStatusColor(session)
-    val isRecording = session.isRecordingLike
-    Surface(
-        shape = RoundedCornerShape(14.dp),
-        color = if (selected) {
-            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.52f)
-        } else {
-            MaterialTheme.colorScheme.surfaceVariant
-        },
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick),
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .border(
-                    width = 1.dp,
-                    color = if (isRecording) {
-                        MaterialTheme.colorScheme.error.copy(alpha = 0.52f)
-                    } else if (selected) {
-                        MaterialTheme.colorScheme.primary.copy(alpha = 0.42f)
-                    } else {
-                        MaterialTheme.colorScheme.outline.copy(alpha = 0.18f)
-                    },
-                    shape = RoundedCornerShape(14.dp),
-                )
-                .padding(horizontal = 12.dp, vertical = 10.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Surface(
-                    color = stateColor,
-                    shape = CircleShape,
-                    modifier = Modifier.size(9.dp),
-                ) {}
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        compactDeviceUiLabel(session.name),
-                        style = MaterialTheme.typography.titleSmall,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Text(
-                        compactSessionStateLabel(session),
-                        style = MaterialTheme.typography.labelMedium,
-                        color = stateColor,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-                session.rssi?.let { rssi ->
-                    Text(
-                        text = "$rssi dBm",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.62f),
-                    )
-                }
-            }
-
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                if (batteryLabel.isNotBlank() && batteryLabel != "--") {
-                    DeviceDashboardMetricChip(text = batteryLabel)
-                }
-                if (isRecording) {
-                    DeviceDashboardMetricChip(
-                        text = "REC ${formatDeviceDashboardDuration(session.recordingSeconds)}",
-                        color = MaterialTheme.colorScheme.error,
-                    )
-                } else if (session.hostState == BleHostSessionState.Previewing) {
-                    DeviceDashboardMetricChip(
-                        text = "Preview",
-                        color = MaterialTheme.colorScheme.primary,
-                    )
-                }
-                if (canQueue) {
-                    FilterChip(
-                        selected = queued,
-                        onClick = onToggleQueue,
-                        label = {
-                            Text(if (queued) "Queued" else "Queue")
-                        },
-                    )
-                }
-            }
-        }
     }
 }
 
@@ -3714,8 +4880,8 @@ private fun LiveCommandDeckCard(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -3789,7 +4955,6 @@ private fun DeviceParameterScreen(
     launchRequestToken: Int,
     onBackToDevices: () -> Unit,
     onOpenPreview: () -> Unit,
-    onOpenLive: () -> Unit,
     onActivateSession: (String) -> Unit,
     onScopeChange: (ControlScope) -> Unit,
     onToggleSessionSelection: (String) -> Unit,
@@ -3797,7 +4962,6 @@ private fun DeviceParameterScreen(
     onClearSelectedSessions: () -> Unit,
     onLinkAction: () -> Unit,
     onResync: () -> Unit,
-    onResyncNoRtc: () -> Unit,
     onReadParams: () -> Unit,
     onReadDsp: () -> Unit,
     onReadAllParams: () -> Unit,
@@ -3831,10 +4995,25 @@ private fun DeviceParameterScreen(
     onReset: () -> Unit,
     onBootloader: () -> Unit,
     onFirmwareUpdate: () -> Unit,
+    onPickBleOtaPackage: () -> Unit,
+    onStageBleOta: () -> Unit,
+    onInstallStagedBleOta: () -> Unit,
+    onRequestAiModuleInstall: (Int) -> Unit,
+    onRefreshAiStatus: () -> Unit,
+    onSelectAiModule: (Int?) -> Unit,
+    onSetAiRuntimeEnabled: (Boolean) -> Unit,
     onUploadSystemParams: () -> Unit,
     onUploadDspParams: (Int) -> Unit,
     onUploadAllParams: () -> Unit,
     onRole: (Int, String) -> Unit,
+    onRefreshSignalAnalysis: () -> Unit,
+    onSetSpikeDetectorConfig: (SpikeDetectorConfigUiState) -> Unit,
+    onSetSpectrumConfig: (SpectrumConfigUiState) -> Unit,
+    onSetSchedulerEnabled: (Boolean) -> Unit,
+    onSetSchedulerRule: (SchedulerRuleUiState) -> Unit,
+    onSetSchedulerRuleEnabled: (Int, Boolean) -> Unit,
+    onClearSchedulerRule: (Int) -> Unit,
+    onClearScheduler: () -> Unit,
 ) {
     val activeSession = uiState.activeSession
     val quickScopeTargets = scopedSessions(uiState)
@@ -3862,7 +5041,8 @@ private fun DeviceParameterScreen(
             EmptyStateCard("Tap a device on Devices to open its parameter controls.")
             return@Column
         }
-        val controlLaunchCacheReady = sessionHasControlLaunchCache(session)
+        val controlLaunchCorePayloadReady = sessionHasControlLaunchCorePayload(session)
+        val controlLaunchCameraPayloadReady = sessionHasCameraControlPayload(session)
 
         LaunchedEffect(launchRequestToken, session.id) {
             if (launchRequestToken > 0) {
@@ -3873,7 +5053,8 @@ private fun DeviceParameterScreen(
             pendingLaunchPayloadSessionId,
             session.id,
             session.isConnected,
-            controlLaunchCacheReady,
+            controlLaunchCorePayloadReady,
+            controlLaunchCameraPayloadReady,
         ) {
             if (pendingLaunchPayloadSessionId != session.id) {
                 return@LaunchedEffect
@@ -3881,8 +5062,13 @@ private fun DeviceParameterScreen(
             if (!session.isConnected) {
                 return@LaunchedEffect
             }
-            if (!controlLaunchCacheReady) {
-                onReadAllParams()
+            // The BLE bootstrap reads system, DSP1, and DSP2 in order.  Do not
+            // issue another 0x90/0x91/0x92 batch while those responses are in
+            // flight; that can interleave the 512-byte payloads on CE64.
+            if (!controlLaunchCorePayloadReady) {
+                return@LaunchedEffect
+            }
+            if (shouldReadCameraDuringControlLaunch(session)) {
                 onReadCameraParams()
             }
             pendingLaunchPayloadSessionId = null
@@ -3895,14 +5081,16 @@ private fun DeviceParameterScreen(
             scope = uiState.controlScope,
             scopeSummary = quickScopeSummary,
             selectedCount = uiState.selectedConnectedSessions.size,
+            selectedSessionIds = uiState.selectedSessionIds,
             onBackToDevices = onBackToDevices,
             onActivateSession = onActivateSession,
             onScopeChange = onScopeChange,
+            onToggleSessionSelection = onToggleSessionSelection,
             onSelectAllConnectedSessions = onSelectAllConnectedSessions,
             onClearSelectedSessions = onClearSelectedSessions,
+            onLinkAction = onLinkAction,
             onResync = onResync,
             onOpenPreview = onOpenPreview,
-            onOpenLive = onOpenLive,
         )
 
         if (!session.isConnected) {
@@ -3910,22 +5098,6 @@ private fun DeviceParameterScreen(
                 session = session,
                 onLinkAction = onLinkAction,
             )
-            return@Column
-        }
-
-        if (connectedControlSessions.size > 1) {
-            if (
-                uiState.controlScope == ControlScope.SelectedDevices ||
-                uiState.selectedConnectedSessions.isNotEmpty()
-            ) {
-                TargetSelectionCard(
-                    sessions = connectedControlSessions,
-                    selectedSessionIds = uiState.selectedSessionIds,
-                    onToggleSelection = onToggleSessionSelection,
-                    onSelectAll = onSelectAllConnectedSessions,
-                    onClearSelection = onClearSelectedSessions,
-                )
-            }
         }
 
         ControlScreen(
@@ -3942,7 +5114,6 @@ private fun DeviceParameterScreen(
             onSelectAllConnectedSessions = onSelectAllConnectedSessions,
             onClearSelectedSessions = onClearSelectedSessions,
             onResync = onResync,
-            onResyncNoRtc = onResyncNoRtc,
             onReadParams = onReadParams,
             onReadDsp = onReadDsp,
             onReadAllParams = onReadAllParams,
@@ -3976,10 +5147,25 @@ private fun DeviceParameterScreen(
             onReset = onReset,
             onBootloader = onBootloader,
             onFirmwareUpdate = onFirmwareUpdate,
+            onPickBleOtaPackage = onPickBleOtaPackage,
+            onStageBleOta = onStageBleOta,
+            onInstallStagedBleOta = onInstallStagedBleOta,
+            onRequestAiModuleInstall = onRequestAiModuleInstall,
+            onRefreshAiStatus = onRefreshAiStatus,
+            onSelectAiModule = onSelectAiModule,
+            onSetAiRuntimeEnabled = onSetAiRuntimeEnabled,
             onUploadSystemParams = onUploadSystemParams,
             onUploadDspParams = onUploadDspParams,
             onUploadAllParams = onUploadAllParams,
             onRole = onRole,
+            onRefreshSignalAnalysis = onRefreshSignalAnalysis,
+            onSetSpikeDetectorConfig = onSetSpikeDetectorConfig,
+            onSetSpectrumConfig = onSetSpectrumConfig,
+            onSetSchedulerEnabled = onSetSchedulerEnabled,
+            onSetSchedulerRule = onSetSchedulerRule,
+            onSetSchedulerRuleEnabled = onSetSchedulerRuleEnabled,
+            onClearSchedulerRule = onClearSchedulerRule,
+            onClearScheduler = onClearScheduler,
         )
     }
 }
@@ -4031,16 +5217,19 @@ private fun DeviceControlTopStrip(
     scope: ControlScope,
     scopeSummary: ScopeStatusSummary,
     selectedCount: Int,
+    selectedSessionIds: Set<String>,
     onBackToDevices: () -> Unit,
     onActivateSession: (String) -> Unit,
     onScopeChange: (ControlScope) -> Unit,
+    onToggleSessionSelection: (String) -> Unit,
     onSelectAllConnectedSessions: () -> Unit,
     onClearSelectedSessions: () -> Unit,
+    onLinkAction: () -> Unit,
     onResync: () -> Unit,
     onOpenPreview: () -> Unit,
-    onOpenLive: () -> Unit,
 ) {
     val showActiveControls = session.isConnected
+    var showTargetPicker by rememberSaveable { mutableStateOf(false) }
     val activeSyncLine = when {
         session.awaitingLiveSync || session.hostState == BleHostSessionState.Syncing ->
             formatSyncProgressTelemetryAscii(session.lastSyncMetric, session.liveSync)
@@ -4080,22 +5269,16 @@ private fun DeviceControlTopStrip(
                         contentDescription = "Sync",
                         enabled = scopeSummary.targetCount > 0,
                         filled = false,
+                        label = "Sync",
                         buttonSize = 40.dp,
                         onClick = onResync,
-                    )
-                    PreviewTransportButton(
-                        icon = Icons.Outlined.SettingsInputAntenna,
-                        contentDescription = "Open online monitor",
-                        enabled = scopeSummary.targetCount > 0,
-                        filled = false,
-                        buttonSize = 40.dp,
-                        onClick = onOpenLive,
                     )
                     PreviewTransportButton(
                         icon = Icons.AutoMirrored.Outlined.ShowChart,
                         contentDescription = "Open preview",
                         enabled = scopeSummary.targetCount > 0,
                         filled = false,
+                        label = "Preview",
                         buttonSize = 40.dp,
                         onClick = onOpenPreview,
                     )
@@ -4117,20 +5300,30 @@ private fun DeviceControlTopStrip(
                 overflow = TextOverflow.Ellipsis,
             )
 
-            if (sessions.size > 1) {
-                FlowRow(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                OutlinedButton(
+                    onClick = onLinkAction,
+                    modifier = Modifier.heightIn(min = 48.dp),
+                    enabled = sessionLinkActionEnabled(session),
                 ) {
+                    Text("Disconnect")
+                }
+                if (sessions.size > 1) {
                     FilterChip(
                         selected = scope == ControlScope.ActiveDevice,
                         onClick = { onScopeChange(ControlScope.ActiveDevice) },
-                        label = { Text("One") },
+                        label = { Text("This device") },
                     )
                     FilterChip(
                         selected = scope == ControlScope.SelectedDevices,
-                        onClick = { onScopeChange(ControlScope.SelectedDevices) },
+                        onClick = {
+                            onScopeChange(ControlScope.SelectedDevices)
+                            showTargetPicker = true
+                        },
                         label = {
                             Text(
                                 if (selectedCount > 0) {
@@ -4146,16 +5339,36 @@ private fun DeviceControlTopStrip(
                         onClick = { onScopeChange(ControlScope.AllConnected) },
                         label = { Text("All ${sessions.size}") },
                     )
-                    AssistChip(
-                        onClick = onSelectAllConnectedSessions,
-                        enabled = sessions.isNotEmpty() && selectedCount < sessions.size,
-                        label = { Text("All") },
+                }
+            }
+        }
+    }
+
+    if (showTargetPicker) {
+        Dialog(onDismissRequest = { showTargetPicker = false }) {
+            Surface(
+                shape = RoundedCornerShape(24.dp),
+                color = MaterialTheme.colorScheme.surface,
+                modifier = Modifier.padding(20.dp),
+            ) {
+                Column(
+                    modifier = Modifier.padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Text("Choose control devices", style = MaterialTheme.typography.titleMedium)
+                    TargetSelectionCard(
+                        sessions = sessions,
+                        selectedSessionIds = selectedSessionIds,
+                        onToggleSelection = onToggleSessionSelection,
+                        onSelectAll = onSelectAllConnectedSessions,
+                        onClearSelection = onClearSelectedSessions,
                     )
-                    AssistChip(
-                        onClick = onClearSelectedSessions,
-                        enabled = selectedCount > 0,
-                        label = { Text("Clear") },
-                    )
+                    TextButton(
+                        onClick = { showTargetPicker = false },
+                        modifier = Modifier.align(Alignment.End),
+                    ) {
+                        Text("Done")
+                    }
                 }
             }
         }
@@ -4195,6 +5408,7 @@ private fun ControlDeviceSelectorChip(
             color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.42f),
             modifier = Modifier
                 .fillMaxWidth()
+                .heightIn(min = 48.dp)
                 .border(
                     width = 1.dp,
                     color = Color(activeSession.traceColorArgb).copy(alpha = 0.34f),
@@ -4252,16 +5466,25 @@ private fun ControlDeviceSelectorChip(
                                     .size(8.dp)
                                     .background(Color(candidate.traceColorArgb), CircleShape)
                             )
-                            Text(
-                                text = compactDeviceUiLabel(candidate.name, candidate.address),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                color = if (candidate.id == activeSession.id) {
-                                    Color(candidate.traceColorArgb)
-                                } else {
-                                    MaterialTheme.colorScheme.onSurface
-                                },
-                            )
+                            Column {
+                                Text(
+                                    text = compactDeviceUiLabel(candidate.name, candidate.address),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    color = if (candidate.id == activeSession.id) {
+                                        Color(candidate.traceColorArgb)
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurface
+                                    },
+                                )
+                                Text(
+                                    text = sessionSelectorTelemetryLabel(candidate),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.62f),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
                         }
                     },
                     onClick = {
@@ -4298,6 +5521,10 @@ private fun QuickDeviceControlCard(
     }
     val recordValue = when {
         scopeSummary.targetCount <= 0 -> "Off"
+        actionSummary.recordingStopPendingCount > 0 && actionSummary.recordingActiveCount <= 0 ->
+            "Pending ${actionSummary.recordingStopPendingCount}"
+        actionSummary.recordingStopPendingCount > 0 ->
+            "Retry ${actionSummary.recordingStopPendingCount}"
         scopeSummary.targetCount == 1 && session.isRecordingLike -> formatSeconds(session.recordingSeconds)
         scopeSummary.recordingCount <= 0 -> "Off"
         else -> scopedCountLabel(scopeSummary.recordingCount, scopeSummary.targetCount)
@@ -4326,6 +5553,7 @@ private fun QuickDeviceControlCard(
                 contentDescription = "Sync",
                 enabled = scopeSummary.targetCount > 0,
                 filled = false,
+                label = "Sync",
                 buttonSize = 42.dp,
                 onClick = onResync,
             )
@@ -4334,6 +5562,7 @@ private fun QuickDeviceControlCard(
                 contentDescription = "Open preview",
                 enabled = scopeSummary.targetCount > 0,
                 filled = false,
+                label = "Preview",
                 buttonSize = 42.dp,
                 onClick = onOpenPreview,
             )
@@ -4342,15 +5571,21 @@ private fun QuickDeviceControlCard(
                 contentDescription = "Start recording",
                 enabled = actionSummary.canStartRecording,
                 filled = true,
+                label = "Record",
                 tint = Color(0xFFD64545),
                 buttonSize = 42.dp,
                 onClick = onStartRecording,
             )
             PreviewTransportButton(
                 icon = Icons.Outlined.Stop,
-                contentDescription = "Stop recording",
+                contentDescription = if (actionSummary.hasPendingRecordingStop) {
+                    "Retry pending recording stop"
+                } else {
+                    "Stop recording"
+                },
                 enabled = actionSummary.canStopRecording,
                 filled = false,
+                label = "Stop rec",
                 tint = Color(0xFFD64545),
                 buttonSize = 42.dp,
                 onClick = onStopRecording,
@@ -4415,6 +5650,7 @@ private fun CompactControlScopeCard(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ControlScreen(
     modifier: Modifier = Modifier,
@@ -4430,7 +5666,6 @@ private fun ControlScreen(
     onSelectAllConnectedSessions: () -> Unit,
     onClearSelectedSessions: () -> Unit,
     onResync: () -> Unit,
-    onResyncNoRtc: () -> Unit,
     onReadParams: () -> Unit,
     onReadDsp: () -> Unit,
     onReadAllParams: () -> Unit,
@@ -4464,12 +5699,36 @@ private fun ControlScreen(
     onReset: () -> Unit,
     onBootloader: () -> Unit,
     onFirmwareUpdate: () -> Unit,
+    onPickBleOtaPackage: () -> Unit,
+    onStageBleOta: () -> Unit,
+    onInstallStagedBleOta: () -> Unit,
+    onRequestAiModuleInstall: (Int) -> Unit,
+    onRefreshAiStatus: () -> Unit,
+    onSelectAiModule: (Int?) -> Unit,
+    onSetAiRuntimeEnabled: (Boolean) -> Unit,
     onUploadSystemParams: () -> Unit,
     onUploadDspParams: (Int) -> Unit,
     onUploadAllParams: () -> Unit,
     onRole: (Int, String) -> Unit,
+    onRefreshSignalAnalysis: () -> Unit,
+    onSetSpikeDetectorConfig: (SpikeDetectorConfigUiState) -> Unit,
+    onSetSpectrumConfig: (SpectrumConfigUiState) -> Unit,
+    onSetSchedulerEnabled: (Boolean) -> Unit,
+    onSetSchedulerRule: (SchedulerRuleUiState) -> Unit,
+    onSetSchedulerRuleEnabled: (Int, Boolean) -> Unit,
+    onClearSchedulerRule: (Int) -> Unit,
+    onClearScheduler: () -> Unit,
 ) {
     val activeSession = uiState.activeSession
+    // Keep the active device in the compact selector even after a link drops.
+    // This preserves the user's context instead of switching the control page to
+    // another device while they are working through a configuration.
+    val controlContextSessions = buildList {
+        activeSession?.let(::add)
+        uiState.connectedSessions
+            .filterNot { it.id == activeSession?.id }
+            .forEach(::add)
+    }
     val canControlScope = when (uiState.controlScope) {
         ControlScope.ActiveDevice -> activeSession?.isConnected == true
         ControlScope.SelectedDevices -> uiState.selectedConnectedSessions.isNotEmpty()
@@ -4495,9 +5754,12 @@ private fun ControlScreen(
     val section = ControlSection.valueOf(sectionName)
     var acquisitionPaneName by rememberSaveable { mutableStateOf(AcquisitionPane.Quick.name) }
     var closedLoopPaneName by rememberSaveable { mutableStateOf(ClosedLoopPane.Quick.name) }
+    var analysisPaneName by rememberSaveable { mutableStateOf(AnalysisPane.Spike.name) }
     var systemPaneName by rememberSaveable { mutableStateOf(SystemPane.Push.name) }
+    val controlListState = rememberLazyListState()
     val acquisitionPane = AcquisitionPane.valueOf(acquisitionPaneName)
     val closedLoopPane = ClosedLoopPane.valueOf(closedLoopPaneName)
+    val analysisPane = AnalysisPane.valueOf(analysisPaneName)
     val systemPane = SystemPane.valueOf(systemPaneName)
     var pendingSystemAction by remember { mutableStateOf<PendingConfirmAction?>(null) }
     val activeRoleIdentity = activeSession?.let { formatBleRoleIdentity(it.roleTag, it.functionTag) }.orEmpty()
@@ -4527,29 +5789,41 @@ private fun ControlScreen(
         }
     }
 
-    LazyColumn(modifier = modifier, verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    LazyColumn(
+        modifier = modifier,
+        state = controlListState,
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
         if (singleDeviceMode) {
-            item {
-                SingleDeviceControlSelectorRow(
-                    section = section,
-                    acquisitionPane = acquisitionPane,
-                    closedLoopPane = closedLoopPane,
-                    systemPane = systemPane,
-                    onSectionChange = { sectionName = it.name },
-                    onAcquisitionPaneChange = { acquisitionPaneName = it.name },
-                    onClosedLoopPaneChange = { closedLoopPaneName = it.name },
-                    onSystemPaneChange = { systemPaneName = it.name },
-                )
+            stickyHeader(key = "single-device-control-selector") {
+                Surface(
+                    color = MaterialTheme.colorScheme.background,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    SingleDeviceControlSelectorRow(
+                        section = section,
+                        acquisitionPane = acquisitionPane,
+                        closedLoopPane = closedLoopPane,
+                        analysisPane = analysisPane,
+                        systemPane = systemPane,
+                        onSectionChange = { sectionName = it.name },
+                        onAcquisitionPaneChange = { acquisitionPaneName = it.name },
+                        onClosedLoopPaneChange = { closedLoopPaneName = it.name },
+                        onAnalysisPaneChange = { analysisPaneName = it.name },
+                        onSystemPaneChange = { systemPaneName = it.name },
+                        modifier = Modifier.padding(bottom = 8.dp),
+                    )
+                }
             }
         } else {
-            item {
+            item(key = "control-launchpad") {
                 ControlLaunchpadCard(
                     scope = uiState.controlScope,
                     selectedCount = uiState.selectedSessions.size,
                     scopeTargetCount = scopeTargets.size,
                     preservedScopeCount = preservedScopedSessions(uiState).size,
                     section = section,
-                    sessions = uiState.connectedSessions,
+                    sessions = controlContextSessions,
                     activeSessionId = uiState.activeSessionId,
                     activeSessionName = activeSession?.name,
                     onScopeChange = onScopeChange,
@@ -4560,7 +5834,7 @@ private fun ControlScreen(
             }
 
             if (shouldShowTargetSelectionCard(uiState)) {
-                item {
+                item(key = "control-target-selection") {
                     TargetSelectionCard(
                         sessions = uiState.connectedSessions,
                         selectedSessionIds = uiState.selectedSessionIds,
@@ -4594,16 +5868,8 @@ private fun ControlScreen(
                             targetCount = scopeSummary.targetCount,
                             session = activeSession,
                             canControlScope = canControlScope,
-                            canControlActive = canControlActive,
                             onResync = onResync,
-                            onResyncNoRtc = onResyncNoRtc,
-                            onReadParams = onReadParams,
-                            onReadDsp = onReadDsp,
                             onReadAllParams = onReadAllParams,
-                            onSnapshot = onSnapshot,
-                            onPreviewSnapshot = onPreviewSnapshot,
-                            onImpedance = onImpedance,
-                            onReadCameraParams = onReadCameraParams,
                             compactSingleDevice = singleDeviceMode,
                         )
                     }
@@ -4842,6 +6108,48 @@ private fun ControlScreen(
                                 }
                             }
                         }
+                        if (activeSession != null) {
+                            item {
+                                ClosedLoopWaveformViewerCard(activeSession)
+                            }
+                        }
+                    }
+                }
+            }
+
+            ControlSection.Analysis -> {
+                if (!singleDeviceMode) {
+                    item {
+                        ControlSubpanelSelectorCard(
+                            sectionLabel = section.label,
+                            subtitle = compactUiCopy("", ""),
+                            options = AnalysisPane.entries.map { it.name to it.label },
+                            selectedOptionName = analysisPane.name,
+                            onSelectOption = { analysisPaneName = it },
+                            compact = false,
+                        )
+                    }
+                }
+
+                item {
+                    if (activeSession != null) {
+                        SignalAnalysisCard(
+                            pane = analysisPane,
+                            session = activeSession,
+                            scope = uiState.controlScope,
+                            targetCount = scopeSummary.targetCount,
+                            canControlScope = canControlScope,
+                            onRefresh = onRefreshSignalAnalysis,
+                            onSetSpikeConfig = onSetSpikeDetectorConfig,
+                            onSetSpectrumConfig = onSetSpectrumConfig,
+                            onSetSchedulerEnabled = onSetSchedulerEnabled,
+                            onSetSchedulerRule = onSetSchedulerRule,
+                            onSetSchedulerRuleEnabled = onSetSchedulerRuleEnabled,
+                            onClearSchedulerRule = onClearSchedulerRule,
+                            onClearScheduler = onClearScheduler,
+                        )
+                    } else {
+                        EmptyStateCard("Signal tools need an active connected device.")
                     }
                 }
             }
@@ -4965,12 +6273,40 @@ private fun ControlScreen(
                                 },
                                 onRequestFirmwareUpdate = {
                                     pendingSystemAction = PendingConfirmAction(
-                                        title = "Request firmware update?",
-                                        message = "The active device will reboot and request firmware update from the bootloader image on SD. BLE will disconnect during the restart.",
-                                        confirmLabel = "Request Update",
+                                        title = "Install SD-card firmware update?",
+                                        message = "This does not upload a file. The active device will reboot and install the bootloader image already stored on its SD card. BLE will disconnect during the restart.",
+                                        confirmLabel = "Install SD update",
                                         onConfirm = onFirmwareUpdate,
                                     )
                                 },
+                                onPickBleOtaPackage = onPickBleOtaPackage,
+                                onRequestStageBleOta = {
+                                    pendingSystemAction = PendingConfirmAction(
+                                        title = "Stage firmware over BLE?",
+                                        message = "The selected single fused .hex firmware will be extracted, copied to the device SD staging area, and fully verified. Recording must be stopped. This does not reboot or install firmware yet.",
+                                        confirmLabel = "Stage & verify",
+                                        onConfirm = onStageBleOta,
+                                    )
+                                },
+                                onRequestInstallStagedBleOta = {
+                                    pendingSystemAction = PendingConfirmAction(
+                                        title = "Install verified firmware?",
+                                        message = "CE64 has verified the complete staged image. Install will restart the device into Bootloader V3. Keep power and the SD card in place until it finishes.",
+                                        confirmLabel = "Install firmware",
+                                        onConfirm = onInstallStagedBleOta,
+                                    )
+                                },
+                                onRequestAiModuleInstall = { slot, label ->
+                                    pendingSystemAction = PendingConfirmAction(
+                                        title = "Activate staged $label AI module?",
+                                        message = "The $label AI module must already be staged on the device SD card. This sends the console-equivalent activation request only; it does not copy a model file to the device.",
+                                        confirmLabel = "Activate $label",
+                                        onConfirm = { onRequestAiModuleInstall(slot) },
+                                    )
+                                },
+                                onRefreshAiStatus = onRefreshAiStatus,
+                                onSelectAiModule = onSelectAiModule,
+                                onSetAiRuntimeEnabled = onSetAiRuntimeEnabled,
                                 onRequestRoleOverride = { mode, label ->
                                     val title = when (mode) {
                                         0 -> "Request AUTO role override?"
@@ -5011,6 +6347,533 @@ private fun ControlScreen(
             }
         }
     }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun SignalAnalysisCard(
+    pane: AnalysisPane,
+    session: DeviceSessionUiState,
+    scope: ControlScope,
+    targetCount: Int,
+    canControlScope: Boolean,
+    onRefresh: () -> Unit,
+    onSetSpikeConfig: (SpikeDetectorConfigUiState) -> Unit,
+    onSetSpectrumConfig: (SpectrumConfigUiState) -> Unit,
+    onSetSchedulerEnabled: (Boolean) -> Unit,
+    onSetSchedulerRule: (SchedulerRuleUiState) -> Unit,
+    onSetSchedulerRuleEnabled: (Int, Boolean) -> Unit,
+    onClearSchedulerRule: (Int) -> Unit,
+    onClearScheduler: () -> Unit,
+) {
+    ControlCard(
+        title = when (pane) {
+            AnalysisPane.Spike -> "Live transient viewer"
+            AnalysisPane.Spectrum -> "Selected-signal spectrum"
+            AnalysisPane.Schedule -> "Device recording schedule"
+        },
+        subtitle = "",
+    ) {
+        when (pane) {
+            AnalysisPane.Spike -> SpikeAnalysisPane(
+                session = session,
+                targetCount = targetCount,
+                canControlScope = canControlScope,
+                onRefresh = onRefresh,
+                onSetConfig = onSetSpikeConfig,
+            )
+
+            AnalysisPane.Spectrum -> SpectrumAnalysisPane(
+                session = session,
+                targetCount = targetCount,
+                canControlScope = canControlScope,
+                onRefresh = onRefresh,
+                onSetConfig = onSetSpectrumConfig,
+            )
+
+            AnalysisPane.Schedule -> SchedulerAnalysisPane(
+                session = session,
+                scope = scope,
+                targetCount = targetCount,
+                canControlScope = canControlScope,
+                onRefresh = onRefresh,
+                onSetEnabled = onSetSchedulerEnabled,
+                onSetRule = onSetSchedulerRule,
+                onSetRuleEnabled = onSetSchedulerRuleEnabled,
+                onClearRule = onClearSchedulerRule,
+                onClearAll = onClearScheduler,
+            )
+        }
+    }
+}
+
+@Composable
+private fun ClosedLoopWaveformViewerCard(session: DeviceSessionUiState) {
+    ControlCard(title = "Live closed-loop events", subtitle = "") {
+        Text(
+            "Continuous CL1 + CL2 capture is best-effort. The vertical guide marks the trigger sample; SD recording remains the priority.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.68f),
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            InfoPill("CL1", (session.triggeredWaveformBlocksByLane[0] ?: 0).toString(), Modifier.weight(1f))
+            InfoPill("CL2", (session.triggeredWaveformBlocksByLane[1] ?: 0).toString(), Modifier.weight(1f))
+            InfoPill("State", if (session.triggerWaveformEnabled) "On" else "Off", Modifier.weight(1f))
+        }
+        listOf(0 to "CL1", 1 to "CL2").forEach { (lane, label) ->
+            val samples = session.latestTriggeredWaveforms[lane]
+            Text(label, style = MaterialTheme.typography.labelLarge)
+            if (samples.isNullOrEmpty()) {
+                EmptyAnalysisPlot("No $label event yet")
+            } else {
+                ClosedLoopWaveformPlot(samples, lane)
+            }
+        }
+    }
+}
+
+@Composable
+private fun ClosedLoopWaveformPlot(samples: List<Int>, lane: Int) {
+    val guideColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.32f)
+    Canvas(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(132.dp)
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.42f), RoundedCornerShape(14.dp)),
+    ) {
+        if (samples.size < 2) return@Canvas
+        val midpoint = size.height / 2f
+        drawLine(guideColor, Offset(0f, midpoint), Offset(size.width, midpoint), 1f)
+        val triggerX = 127f * size.width / (samples.size - 1).toFloat()
+        drawLine(guideColor, Offset(triggerX, 0f), Offset(triggerX, size.height), 1f)
+        val maxAmplitude = samples.maxOf { abs(it) }.coerceAtLeast(1).toFloat()
+        val trace = Path()
+        samples.forEachIndexed { index, sample ->
+            val x = index * size.width / (samples.size - 1).toFloat()
+            val y = midpoint - sample / maxAmplitude * (size.height * 0.40f)
+            if (index == 0) trace.moveTo(x, y) else trace.lineTo(x, y)
+        }
+        drawPath(
+            trace,
+            color = if (lane == 0) Color(0xFF287BB3) else Color(0xFFB34F82),
+            style = Stroke(width = 2.2f, cap = StrokeCap.Round),
+        )
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun SpikeAnalysisPane(
+    session: DeviceSessionUiState,
+    targetCount: Int,
+    canControlScope: Boolean,
+    onRefresh: () -> Unit,
+    onSetConfig: (SpikeDetectorConfigUiState) -> Unit,
+) {
+    val config = session.spikeDetectorConfig ?: SpikeDetectorConfigUiState(channelEnableMask = -1L)
+    var selectedChannel by rememberSaveable(session.id) { mutableStateOf(0) }
+    var thresholdText by remember(config, selectedChannel) {
+        mutableStateOf(config.thresholds.getOrElse(selectedChannel) { 120 }.toString())
+    }
+    val selectedEnabled = config.channelEnabled(selectedChannel)
+    val selectedPositive = config.positivePolarity(selectedChannel)
+    val latest = session.recentSpikeEvents.firstOrNull { it.channel == selectedChannel }
+
+    Text(
+        "Best-effort events are available only during active 20 kHz SD recording. This never changes the recorded raw data.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.68f),
+    )
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        InfoPill("Viewer", if (config.enabled) "On" else "Off", Modifier.weight(1f))
+        InfoPill("Events", session.recentSpikeEvents.size.toString(), Modifier.weight(1f))
+        InfoPill("Drops", session.spikeViewerDropCount.toString(), Modifier.weight(1f))
+    }
+    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        FilledTonalButton(
+            onClick = { onSetConfig(config.copy(enabled = !config.enabled)) },
+            enabled = canControlScope,
+            modifier = Modifier.weight(1f),
+        ) {
+            Text(scopeActionLabel(if (config.enabled) "Disable viewer" else "Enable viewer", targetCount))
+        }
+        OutlinedButton(onClick = onRefresh, enabled = canControlScope, modifier = Modifier.weight(0.7f)) {
+            Text("Refresh")
+        }
+    }
+
+    Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+        OutlinedButton(
+            onClick = { selectedChannel = (selectedChannel + 63) % 64 },
+            enabled = canControlScope,
+        ) { Text("‹") }
+        Text("Channel ${selectedChannel + 1}", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f), textAlign = TextAlign.Center)
+        OutlinedButton(
+            onClick = { selectedChannel = (selectedChannel + 1) % 64 },
+            enabled = canControlScope,
+        ) { Text("›") }
+    }
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        FilterChip(
+            selected = selectedEnabled,
+            onClick = {
+                val bit = 1L shl selectedChannel
+                val mask = if (selectedEnabled) config.channelEnableMask and bit.inv() else config.channelEnableMask or bit
+                onSetConfig(config.copy(channelEnableMask = mask))
+            },
+            enabled = canControlScope,
+            label = { Text(if (selectedEnabled) "Detect on" else "Detect off") },
+        )
+        FilterChip(
+            selected = selectedPositive,
+            onClick = {
+                val bit = 1L shl selectedChannel
+                val mask = if (selectedPositive) config.positivePolarityMask and bit.inv() else config.positivePolarityMask or bit
+                onSetConfig(config.copy(positivePolarityMask = mask))
+            },
+            enabled = canControlScope,
+            label = { Text(if (selectedPositive) "Positive slope" else "Negative slope") },
+        )
+    }
+    Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+        OutlinedTextField(
+            value = thresholdText,
+            onValueChange = { thresholdText = it.filter(Char::isDigit).take(5) },
+            label = { Text("Slope threshold (counts)") },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            modifier = Modifier.weight(1f),
+        )
+        FilledTonalButton(
+            onClick = {
+                val thresholds = config.thresholds.toMutableList()
+                thresholds[selectedChannel] = thresholdText.toIntOrNull()?.coerceIn(1, Short.MAX_VALUE.toInt()) ?: thresholds[selectedChannel]
+                onSetConfig(config.copy(thresholds = thresholds))
+            },
+            enabled = canControlScope,
+        ) { Text("Apply") }
+    }
+    if (latest != null) {
+        Text(
+            "Latest event: #${latest.sequence} · sample ${latest.sampleIndex} · ${if (latest.positivePolarity) "positive" else "negative"} slope",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+        )
+        SpikeWaveformPlot(latest.samples, positive = latest.positivePolarity)
+    } else {
+        EmptyAnalysisPlot("No event from this channel yet")
+    }
+}
+
+@Composable
+private fun SpikeWaveformPlot(samples: List<Int>, positive: Boolean) {
+    val guideColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.32f)
+    Canvas(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(152.dp)
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.42f), RoundedCornerShape(14.dp)),
+    ) {
+        if (samples.size < 2) return@Canvas
+        val midpoint = size.height / 2f
+        drawLine(guideColor, Offset(0f, midpoint), Offset(size.width, midpoint), 1f)
+        val maxAmplitude = samples.maxOf { abs(it) }.coerceAtLeast(1).toFloat()
+        val trace = Path()
+        samples.forEachIndexed { index, sample ->
+            val x = index * size.width / (samples.size - 1).toFloat()
+            val y = midpoint - sample / maxAmplitude * (size.height * 0.40f)
+            if (index == 0) trace.moveTo(x, y) else trace.lineTo(x, y)
+        }
+        drawPath(
+            trace,
+            color = if (positive) Color(0xFFC4486D) else Color(0xFF3374C4),
+            style = Stroke(width = 2.5f, cap = StrokeCap.Round),
+        )
+    }
+}
+
+@Composable
+private fun EmptyAnalysisPlot(message: String) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(112.dp)
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.34f), RoundedCornerShape(14.dp)),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(message, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.58f))
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun SpectrumAnalysisPane(
+    session: DeviceSessionUiState,
+    targetCount: Int,
+    canControlScope: Boolean,
+    onRefresh: () -> Unit,
+    onSetConfig: (SpectrumConfigUiState) -> Unit,
+) {
+    val deviceConfig = session.spectrumConfig ?: SpectrumConfigUiState()
+    var source by rememberSaveable(session.id) { mutableStateOf(deviceConfig.source) }
+    var channelText by rememberSaveable(session.id) { mutableStateOf(deviceConfig.channel.toString()) }
+    var periodText by rememberSaveable(session.id) { mutableStateOf(deviceConfig.periodMs.toString()) }
+    val snapshot = session.spectrumSnapshot
+    val sourceLabel = if (source == Ce32Protocol.SpectrumSourceEphys) "Ephys" else "ADC"
+
+    Text(
+        "A runtime-only 128-point FFT. It samples one selected signal and automatically yields to recording, SD, and command traffic.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.68f),
+    )
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        InfoPill("Source", deviceConfig.sourceLabel, Modifier.weight(1f))
+        InfoPill("State", if (deviceConfig.enabled) "On" else "Off", Modifier.weight(1f))
+        InfoPill("Skipped", deviceConfig.skippedUpdates.toString(), Modifier.weight(1f))
+    }
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        FilterChip(
+            selected = source == Ce32Protocol.SpectrumSourceAdc,
+            onClick = { source = Ce32Protocol.SpectrumSourceAdc; channelText = "0" },
+            enabled = canControlScope,
+            label = { Text("ADC") },
+        )
+        FilterChip(
+            selected = source == Ce32Protocol.SpectrumSourceEphys,
+            onClick = { source = Ce32Protocol.SpectrumSourceEphys },
+            enabled = canControlScope,
+            label = { Text("Ephys") },
+        )
+    }
+    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        if (source == Ce32Protocol.SpectrumSourceEphys) {
+            OutlinedTextField(
+                value = channelText,
+                onValueChange = { channelText = it.filter(Char::isDigit).take(2) },
+                label = { Text("Channel (0–63)") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                modifier = Modifier.weight(1f),
+            )
+        }
+        OutlinedTextField(
+            value = periodText,
+            onValueChange = { periodText = it.filter(Char::isDigit).take(4) },
+            label = { Text("Update ms") },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            modifier = Modifier.weight(1f),
+        )
+    }
+    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        FilledTonalButton(
+            onClick = {
+                val enabled = !deviceConfig.enabled
+                onSetConfig(
+                    deviceConfig.copy(
+                        enabled = enabled,
+                        source = source,
+                        channel = if (source == Ce32Protocol.SpectrumSourceEphys) channelText.toIntOrNull()?.coerceIn(0, 63) ?: 0 else 0,
+                        firstBin = if (source == Ce32Protocol.SpectrumSourceEphys) 1 else 16,
+                        lastBin = 63,
+                        periodMs = periodText.toIntOrNull()?.coerceIn(100, 1_000) ?: 200,
+                    ),
+                )
+            },
+            enabled = canControlScope,
+            modifier = Modifier.weight(1f),
+        ) {
+            Text(scopeActionLabel(if (deviceConfig.enabled) "Stop spectrum" else "Start spectrum", targetCount))
+        }
+        OutlinedButton(onClick = onRefresh, enabled = canControlScope, modifier = Modifier.weight(0.7f)) { Text("Refresh") }
+    }
+    if (snapshot?.isComplete == true) {
+        val frequencyHz = snapshot.peakBin * if (snapshot.source == Ce32Protocol.SpectrumSourceEphys) 625.0 / 128.0 else 160_000.0 / 128.0
+        Text(
+            "Peak ${formatAnalysisFrequency(frequencyHz)} · confidence ${snapshot.confidence} · ${snapshot.sourceLabel()}",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+        )
+        SpectrumLevelPlot(snapshot)
+    } else {
+        EmptyAnalysisPlot("No complete spectrum snapshot yet")
+    }
+}
+
+@Composable
+private fun SpectrumLevelPlot(snapshot: SpectrumSnapshotUiState) {
+    Canvas(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(152.dp)
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.42f), RoundedCornerShape(14.dp)),
+    ) {
+        val levels = snapshot.levels
+        if (levels.isEmpty()) return@Canvas
+        val maxLevel = levels.maxOrNull()?.coerceAtLeast(1) ?: 1
+        val spacing = size.width / levels.size
+        levels.forEachIndexed { index, level ->
+            val barWidth = spacing * 0.66f
+            val height = size.height * (level.toFloat() / maxLevel.toFloat()).coerceIn(0.02f, 1f)
+            val x = index * spacing + (spacing - barWidth) / 2f
+            drawRect(
+                color = if (index == snapshot.peakBin % levels.size) Color(0xFFEA9F32) else Color(0xFF5C82C9),
+                topLeft = Offset(x, size.height - height),
+                size = Size(barWidth, height),
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun SchedulerAnalysisPane(
+    session: DeviceSessionUiState,
+    scope: ControlScope,
+    targetCount: Int,
+    canControlScope: Boolean,
+    onRefresh: () -> Unit,
+    onSetEnabled: (Boolean) -> Unit,
+    onSetRule: (SchedulerRuleUiState) -> Unit,
+    onSetRuleEnabled: (Int, Boolean) -> Unit,
+    onClearRule: (Int) -> Unit,
+    onClearAll: () -> Unit,
+) {
+    val status = session.schedulerStatus
+    val rules = session.schedulerConfig?.rules ?: List(Ce32Protocol.SchedulerRuleCount) { SchedulerRuleUiState(id = it) }
+    var selectedRuleId by rememberSaveable(session.id) { mutableStateOf(0) }
+    val selectedRule = rules.getOrElse(selectedRuleId) { SchedulerRuleUiState(id = selectedRuleId) }
+    var hourText by remember(selectedRule) { mutableStateOf((selectedRule.timeOfDaySeconds / 3_600L).toString()) }
+    var minuteText by remember(selectedRule) { mutableStateOf(((selectedRule.timeOfDaySeconds % 3_600L) / 60L).toString()) }
+    var durationText by remember(selectedRule) { mutableStateOf((selectedRule.durationSeconds / 60L).coerceAtLeast(1L).toString()) }
+    var startAction by remember(selectedRule) { mutableStateOf(selectedRule.action != 1) }
+    var clearAllArmed by rememberSaveable(session.id) { mutableStateOf(false) }
+
+    Text(
+        "Rules run on the device even when the phone is disconnected. Set device time first; the scheduler uses the CE64 local RTC without timezone or DST handling.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.68f),
+    )
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        InfoPill("Schedule", if (status?.enabled == true) "On" else "Off", Modifier.weight(1f))
+        InfoPill("Clock", if (status?.clockValid == true) "Ready" else "Set time", Modifier.weight(1f))
+        InfoPill("Active", rules.count { it.enabled }.toString(), Modifier.weight(1f))
+    }
+    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        FilledTonalButton(
+            onClick = { onSetEnabled(status?.enabled != true) },
+            enabled = canControlScope,
+            modifier = Modifier.weight(1f),
+        ) { Text(scopeActionLabel(if (status?.enabled == true) "Disable schedule" else "Enable schedule", targetCount)) }
+        OutlinedButton(onClick = onRefresh, enabled = canControlScope, modifier = Modifier.weight(0.7f)) { Text("Refresh") }
+    }
+    Text("Rule", style = MaterialTheme.typography.labelLarge)
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(7.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+        rules.forEach { rule ->
+            FilterChip(
+                selected = selectedRuleId == rule.id,
+                onClick = { selectedRuleId = rule.id.coerceIn(0, Ce32Protocol.SchedulerRuleCount - 1) },
+                label = { Text("${rule.id + 1}${if (rule.enabled) " •" else ""}") },
+            )
+        }
+    }
+    Text("Rule ${selectedRuleId + 1}: ${selectedRule.triggerLabel} · ${selectedRule.actionLabel}", style = MaterialTheme.typography.bodyMedium)
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        FilterChip(selected = startAction, onClick = { startAction = true }, enabled = canControlScope, label = { Text("Start recording") })
+        FilterChip(selected = !startAction, onClick = { startAction = false }, enabled = canControlScope, label = { Text("Stop recording") })
+    }
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        OutlinedTextField(
+            value = hourText,
+            onValueChange = { hourText = it.filter(Char::isDigit).take(2) },
+            label = { Text("Hour") },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            modifier = Modifier.weight(1f),
+        )
+        OutlinedTextField(
+            value = minuteText,
+            onValueChange = { minuteText = it.filter(Char::isDigit).take(2) },
+            label = { Text("Minute") },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            modifier = Modifier.weight(1f),
+        )
+        if (startAction) {
+            OutlinedTextField(
+                value = durationText,
+                onValueChange = { durationText = it.filter(Char::isDigit).take(4) },
+                label = { Text("Min") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                modifier = Modifier.weight(1f),
+            )
+        }
+    }
+    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        FilledTonalButton(
+            onClick = {
+                val hour = hourText.toIntOrNull()?.coerceIn(0, 23) ?: 0
+                val minute = minuteText.toIntOrNull()?.coerceIn(0, 59) ?: 0
+                val duration = if (startAction) (durationText.toLongOrNull()?.coerceIn(1L, 1_440L) ?: 1L) * 60L else 0L
+                onSetRule(
+                    selectedRule.copy(
+                        id = selectedRuleId,
+                        enabled = true,
+                        trigger = 0,
+                        action = if (startAction) 0 else 1,
+                        profileId = if (startAction) selectedRule.profileId else 0xFF,
+                        timeOfDaySeconds = (hour * 3_600L) + (minute * 60L),
+                        periodSeconds = 0L,
+                        durationSeconds = duration,
+                        evaluationSeconds = 60L,
+                        debounceCount = 1,
+                        maxDeferrals = 1,
+                    ),
+                )
+            },
+            enabled = canControlScope,
+            modifier = Modifier.weight(1f),
+        ) { Text(scopeActionLabel("Save daily rule", targetCount)) }
+        OutlinedButton(
+            onClick = { onSetRuleEnabled(selectedRuleId, !selectedRule.enabled) },
+            enabled = canControlScope,
+            modifier = Modifier.weight(0.72f),
+        ) { Text(if (selectedRule.enabled) "Disable" else "Enable") }
+    }
+    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        OutlinedButton(
+            onClick = { onClearRule(selectedRuleId) },
+            enabled = canControlScope,
+            modifier = Modifier.weight(1f),
+        ) { Text("Clear rule") }
+        OutlinedButton(
+            onClick = {
+                if (clearAllArmed) {
+                    clearAllArmed = false
+                    onClearAll()
+                } else {
+                    clearAllArmed = true
+                }
+            },
+            enabled = canControlScope,
+            modifier = Modifier.weight(1f),
+        ) { Text(if (clearAllArmed) "Tap again to clear all" else "Clear all") }
+    }
+    Text(
+        "This editor covers daily start/stop rules. The full CE64 API—including one-shot, periodic, conditional, signal rules, and 512-byte recording profiles—is available through the same Android BLE protocol for future dedicated workflows.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+    )
+}
+
+private fun SpectrumSnapshotUiState.sourceLabel(): String =
+    if (source == Ce32Protocol.SpectrumSourceEphys) "ephys ch ${channel + 1}" else "ADC"
+
+private fun formatAnalysisFrequency(valueHz: Double): String = when {
+    valueHz >= 1_000_000.0 -> "${"%.1f".format(Locale.US, valueHz / 1_000_000.0)} MHz"
+    valueHz >= 1_000.0 -> "${"%.1f".format(Locale.US, valueHz / 1_000.0)} kHz"
+    else -> "${"%.1f".format(Locale.US, valueHz)} Hz"
 }
 
 @Composable
@@ -5609,7 +7472,7 @@ private fun StreamRateControlCard(
 ) {
     val parsed = session.parsedSystemParams
     var requestedRateText by remember(session.id) {
-        mutableStateOf(parsed?.ephysSamplingRate?.takeIf { it > 0 }?.toString() ?: "1250")
+        mutableStateOf(parsed?.ephysSamplingRate?.takeIf { it >= 0 }?.toString() ?: "1250")
     }
     var cameraEnabled by remember(session.id) {
         mutableStateOf(parsed?.cameraEnabled == true)
@@ -5633,7 +7496,7 @@ private fun StreamRateControlCard(
         parsed?.cameraEnabled,
         parsed?.adcEnabled,
     ) {
-        requestedRateText = parsed?.ephysSamplingRate?.takeIf { it > 0 }?.toString() ?: requestedRateText
+        requestedRateText = parsed?.ephysSamplingRate?.takeIf { it >= 0 }?.toString() ?: requestedRateText
         cameraEnabled = parsed?.cameraEnabled == true
         adcEnabled = parsed?.adcEnabled == true
     }
@@ -5649,7 +7512,7 @@ private fun StreamRateControlCard(
     val vbattThresholdRaw = vbattThresholdText.toIntOrNull()
     val audioRatio = audioRatioText.toIntOrNull()
     val cameraRatio = cameraRatioText.toIntOrNull()
-    val ratePresets = (listOfNotNull(parsed?.ephysSamplingRate?.takeIf { it > 0 }) + Ce32Protocol.CommonEphysRates)
+    val ratePresets = (listOfNotNull(parsed?.ephysSamplingRate?.takeIf { it >= 0 }) + Ce32Protocol.CommonEphysRates)
         .distinct()
         .sorted()
     val scopeLabel = when (scope) {
@@ -5709,7 +7572,7 @@ private fun StreamRateControlCard(
                     requestedRateText = next.take(6)
                 }
             },
-            label = { Text("Ephys rate (Hz)") },
+            label = { Text("FS / ephys rate (0 = Off)") },
             enabled = session.isConnected,
             modifier = Modifier.fillMaxWidth(),
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
@@ -5798,7 +7661,7 @@ private fun StreamRateControlCard(
         FilledTonalButton(
             onClick = { requestedRate?.let { onApplyStreamRates(it, cameraEnabled, adcEnabled) } },
             modifier = Modifier.fillMaxWidth(),
-            enabled = session.isConnected && parsed != null && requestedRate != null && requestedRate > 0,
+            enabled = session.isConnected && parsed != null && requestedRate != null && requestedRate in 0..0xFFFF,
         ) {
             Text(scopeActionLabel("Apply Rates", targetCount))
         }
@@ -5806,7 +7669,7 @@ private fun StreamRateControlCard(
         OutlinedButton(
             onClick = { requestedRate?.let(onQuickSetFs) },
             modifier = Modifier.fillMaxWidth(),
-            enabled = session.isConnected && requestedRate != null && requestedRate > 0,
+            enabled = session.isConnected && requestedRate != null && requestedRate in 0..0xFFFF,
         ) {
             Text(scopeActionLabel("FS Only", targetCount))
         }
@@ -5836,16 +7699,8 @@ private fun PocketAcquisitionDeckCard(
     targetCount: Int,
     session: DeviceSessionUiState?,
     canControlScope: Boolean,
-    canControlActive: Boolean,
     onResync: () -> Unit,
-    onResyncNoRtc: () -> Unit,
-    onReadParams: () -> Unit,
-    onReadDsp: () -> Unit,
     onReadAllParams: () -> Unit,
-    onSnapshot: () -> Unit,
-    onPreviewSnapshot: () -> Unit,
-    onImpedance: () -> Unit,
-    onReadCameraParams: () -> Unit,
     compactSingleDevice: Boolean = false,
 ) {
     val parsed = session?.parsedSystemParams
@@ -5889,22 +7744,12 @@ private fun PocketAcquisitionDeckCard(
             )
         }
 
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            FilledTonalButton(onClick = onResync, modifier = Modifier.weight(1f), enabled = canControlScope) {
-                Text("Resync")
-            }
-            OutlinedButton(onClick = onResyncNoRtc, modifier = Modifier.weight(1f), enabled = canControlScope) {
-                Text("No RTC")
-            }
-        }
-
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            OutlinedButton(onClick = onReadParams, modifier = Modifier.weight(1f), enabled = canControlScope) {
-                Text("Read Params")
-            }
-            OutlinedButton(onClick = onReadDsp, modifier = Modifier.weight(1f), enabled = canControlScope) {
-                Text("Read DSP")
-            }
+        FilledTonalButton(
+            onClick = onResync,
+            modifier = Modifier.fillMaxWidth(),
+            enabled = canControlScope,
+        ) {
+            Text(if (compactSingleDevice) "Resync device" else "Resync selected devices")
         }
 
         FilledTonalButton(
@@ -5912,25 +7757,15 @@ private fun PocketAcquisitionDeckCard(
             modifier = Modifier.fillMaxWidth(),
             enabled = canControlScope,
         ) {
-            Text("Read All")
+            Text(if (compactSingleDevice) "Refresh device settings" else "Read All")
         }
 
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            FilledTonalButton(onClick = onSnapshot, modifier = Modifier.weight(1f), enabled = canControlActive) {
-                Text("Snapshot")
-            }
-            OutlinedButton(onClick = onPreviewSnapshot, modifier = Modifier.weight(1f), enabled = canControlActive) {
-                Text("Preview Shot")
-            }
-        }
-
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            OutlinedButton(onClick = onImpedance, modifier = Modifier.weight(1f), enabled = canControlScope) {
-                Text(scopeActionLabel("Impedance Test", targetCount))
-            }
-            OutlinedButton(onClick = onReadCameraParams, modifier = Modifier.weight(1f), enabled = canControlScope) {
-                Text(scopeActionLabel("Camera", targetCount))
-            }
+        if (compactSingleDevice) {
+            Text(
+                "Use Rates, Camera, or Impedance above for their specific tools.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.68f),
+            )
         }
     }
 }
@@ -6445,15 +8280,17 @@ private fun AdvancedClosedLoopCard(
     var dsp0Ma by remember(session.id) { mutableStateOf(dsp0?.maOrder?.toString() ?: "0") }
     var dsp0Filter by remember(session.id) { mutableStateOf(dsp0?.filterType?.toString() ?: "0") }
     var dsp0Formula by remember(session.id) { mutableStateOf(dsp0?.formula?.toString() ?: "0") }
-    var dsp0ChA by remember(session.id) { mutableStateOf(dsp0?.channels?.getOrNull(0)?.plus(1)?.toString() ?: "1") }
-    var dsp0ChB by remember(session.id) { mutableStateOf(dsp0?.channels?.getOrNull(1)?.plus(1)?.toString() ?: "1") }
-    var dsp0ChC by remember(session.id) { mutableStateOf(dsp0?.channels?.getOrNull(2)?.plus(1)?.toString() ?: "1") }
+    var dsp0ChA by remember(session.id) { mutableStateOf(dspChannelInputValue(dsp0?.channels, 0)) }
+    var dsp0ChB by remember(session.id) { mutableStateOf(dspChannelInputValue(dsp0?.channels, 1)) }
+    var dsp0ChC by remember(session.id) { mutableStateOf(dspChannelInputValue(dsp0?.channels, 2)) }
+    var dsp0ChD by remember(session.id) { mutableStateOf(dspChannelInputValue(dsp0?.channels, 3)) }
     var dsp1Ma by remember(session.id) { mutableStateOf(dsp1?.maOrder?.toString() ?: "0") }
     var dsp1Filter by remember(session.id) { mutableStateOf(dsp1?.filterType?.toString() ?: "0") }
     var dsp1Formula by remember(session.id) { mutableStateOf(dsp1?.formula?.toString() ?: "0") }
-    var dsp1ChA by remember(session.id) { mutableStateOf(dsp1?.channels?.getOrNull(0)?.plus(1)?.toString() ?: "1") }
-    var dsp1ChB by remember(session.id) { mutableStateOf(dsp1?.channels?.getOrNull(1)?.plus(1)?.toString() ?: "1") }
-    var dsp1ChC by remember(session.id) { mutableStateOf(dsp1?.channels?.getOrNull(2)?.plus(1)?.toString() ?: "1") }
+    var dsp1ChA by remember(session.id) { mutableStateOf(dspChannelInputValue(dsp1?.channels, 0)) }
+    var dsp1ChB by remember(session.id) { mutableStateOf(dspChannelInputValue(dsp1?.channels, 1)) }
+    var dsp1ChC by remember(session.id) { mutableStateOf(dspChannelInputValue(dsp1?.channels, 2)) }
+    var dsp1ChD by remember(session.id) { mutableStateOf(dspChannelInputValue(dsp1?.channels, 3)) }
 
     LaunchedEffect(session.id, sys?.stimDelays, sys?.stimRandomDelays, sys?.pulseWidths, sys?.stimIntervals, sys?.pulseCounts) {
         if (sys != null) {
@@ -6475,9 +8312,10 @@ private fun AdvancedClosedLoopCard(
             dsp0Ma = dsp0.maOrder.toString()
             dsp0Filter = dsp0.filterType.toString()
             dsp0Formula = dsp0.formula.toString()
-            dsp0ChA = dsp0.channels.getOrElse(0) { 0 }.plus(1).toString()
-            dsp0ChB = dsp0.channels.getOrElse(1) { 0 }.plus(1).toString()
-            dsp0ChC = dsp0.channels.getOrElse(2) { 0 }.plus(1).toString()
+            dsp0ChA = dspChannelInputValue(dsp0.channels, 0)
+            dsp0ChB = dspChannelInputValue(dsp0.channels, 1)
+            dsp0ChC = dspChannelInputValue(dsp0.channels, 2)
+            dsp0ChD = dspChannelInputValue(dsp0.channels, 3)
         }
     }
 
@@ -6486,9 +8324,10 @@ private fun AdvancedClosedLoopCard(
             dsp1Ma = dsp1.maOrder.toString()
             dsp1Filter = dsp1.filterType.toString()
             dsp1Formula = dsp1.formula.toString()
-            dsp1ChA = dsp1.channels.getOrElse(0) { 0 }.plus(1).toString()
-            dsp1ChB = dsp1.channels.getOrElse(1) { 0 }.plus(1).toString()
-            dsp1ChC = dsp1.channels.getOrElse(2) { 0 }.plus(1).toString()
+            dsp1ChA = dspChannelInputValue(dsp1.channels, 0)
+            dsp1ChB = dspChannelInputValue(dsp1.channels, 1)
+            dsp1ChC = dspChannelInputValue(dsp1.channels, 2)
+            dsp1ChD = dspChannelInputValue(dsp1.channels, 3)
         }
     }
     val scopeLabel = when (scope) {
@@ -6583,17 +8422,20 @@ private fun AdvancedClosedLoopCard(
             onChBChange = { dsp0ChB = sanitizeIntInput(it) },
             chCText = dsp0ChC,
             onChCChange = { dsp0ChC = sanitizeIntInput(it) },
+            chDText = dsp0ChD,
+            onChDChange = { dsp0ChD = sanitizeIntInput(it) },
             enabled = canControlScope,
             applyLabel = scopeActionLabel("Apply DSP 1 Live", targetCount),
             onApply = {
                 val ma = dsp0Ma.toIntOrNull()
                 val filter = dsp0Filter.toIntOrNull()
                 val formula = dsp0Formula.toIntOrNull()
-                val chA = dsp0ChA.toIntOrNull()?.minus(1)
-                val chB = dsp0ChB.toIntOrNull()?.minus(1)
-                val chC = dsp0ChC.toIntOrNull()?.minus(1)
-                if (ma != null && filter != null && formula != null && chA != null && chB != null && chC != null) {
-                    onSetDspLiveParams(0, ma, filter, formula, listOf(chA, chB, chC))
+                val chA = dspChannelInputToZeroBased(dsp0ChA)
+                val chB = dspChannelInputToZeroBased(dsp0ChB)
+                val chC = dspChannelInputToZeroBased(dsp0ChC)
+                val chD = dspChannelInputToZeroBased(dsp0ChD)
+                if (ma != null && filter != null && formula != null && chA != null && chB != null && chC != null && chD != null) {
+                    onSetDspLiveParams(0, ma, filter, formula, listOf(chA, chB, chC, chD))
                 }
             },
         )
@@ -6612,21 +8454,33 @@ private fun AdvancedClosedLoopCard(
             onChBChange = { dsp1ChB = sanitizeIntInput(it) },
             chCText = dsp1ChC,
             onChCChange = { dsp1ChC = sanitizeIntInput(it) },
+            chDText = dsp1ChD,
+            onChDChange = { dsp1ChD = sanitizeIntInput(it) },
             enabled = canControlScope,
             applyLabel = scopeActionLabel("Apply DSP 2 Live", targetCount),
             onApply = {
                 val ma = dsp1Ma.toIntOrNull()
                 val filter = dsp1Filter.toIntOrNull()
                 val formula = dsp1Formula.toIntOrNull()
-                val chA = dsp1ChA.toIntOrNull()?.minus(1)
-                val chB = dsp1ChB.toIntOrNull()?.minus(1)
-                val chC = dsp1ChC.toIntOrNull()?.minus(1)
-                if (ma != null && filter != null && formula != null && chA != null && chB != null && chC != null) {
-                    onSetDspLiveParams(1, ma, filter, formula, listOf(chA, chB, chC))
+                val chA = dspChannelInputToZeroBased(dsp1ChA)
+                val chB = dspChannelInputToZeroBased(dsp1ChB)
+                val chC = dspChannelInputToZeroBased(dsp1ChC)
+                val chD = dspChannelInputToZeroBased(dsp1ChD)
+                if (ma != null && filter != null && formula != null && chA != null && chB != null && chC != null && chD != null) {
+                    onSetDspLiveParams(1, ma, filter, formula, listOf(chA, chB, chC, chD))
                 }
             },
         )
     }
+}
+
+private fun dspChannelInputValue(channels: List<Int>?, index: Int): String {
+    val zeroBased = channels?.getOrNull(index)
+    return zeroBased?.takeIf { it in 0..63 }?.plus(1)?.toString() ?: "1"
+}
+
+private fun dspChannelInputToZeroBased(value: String): Int? {
+    return value.toIntOrNull()?.takeIf { it in 1..64 }?.minus(1)
 }
 
 @Composable
@@ -7059,6 +8913,8 @@ private fun DspLiveEditor(
     onChBChange: (String) -> Unit,
     chCText: String,
     onChCChange: (String) -> Unit,
+    chDText: String,
+    onChDChange: (String) -> Unit,
     enabled: Boolean,
     applyLabel: String,
     onApply: () -> Unit,
@@ -7070,8 +8926,8 @@ private fun DspLiveEditor(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Text(title, fontWeight = FontWeight.SemiBold)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -7103,11 +8959,16 @@ private fun DspLiveEditor(
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 )
             }
+            Text(
+                "Input channel map (A-D, 1-64)",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f),
+            )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(
                     value = chAText,
                     onValueChange = onChAChange,
-                    label = { Text("Ch A") },
+                    label = { Text("A") },
                     modifier = Modifier.weight(1f),
                     enabled = enabled,
                     singleLine = true,
@@ -7116,7 +8977,7 @@ private fun DspLiveEditor(
                 OutlinedTextField(
                     value = chBText,
                     onValueChange = onChBChange,
-                    label = { Text("Ch B") },
+                    label = { Text("B") },
                     modifier = Modifier.weight(1f),
                     enabled = enabled,
                     singleLine = true,
@@ -7125,7 +8986,16 @@ private fun DspLiveEditor(
                 OutlinedTextField(
                     value = chCText,
                     onValueChange = onChCChange,
-                    label = { Text("Ch C") },
+                    label = { Text("C") },
+                    modifier = Modifier.weight(1f),
+                    enabled = enabled,
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                )
+                OutlinedTextField(
+                    value = chDText,
+                    onValueChange = onChDChange,
+                    label = { Text("D") },
                     modifier = Modifier.weight(1f),
                     enabled = enabled,
                     singleLine = true,
@@ -7306,11 +9176,29 @@ private fun SystemLifecycleCard(
     onRequestReset: () -> Unit,
     onRequestBootloader: () -> Unit,
     onRequestFirmwareUpdate: () -> Unit,
+    onPickBleOtaPackage: () -> Unit,
+    onRequestStageBleOta: () -> Unit,
+    onRequestInstallStagedBleOta: () -> Unit,
+    onRequestAiModuleInstall: (Int, String) -> Unit,
+    onRefreshAiStatus: () -> Unit,
+    onSelectAiModule: (Int?) -> Unit,
+    onSetAiRuntimeEnabled: (Boolean) -> Unit,
     onRequestRoleOverride: (Int, String) -> Unit,
 ) {
     val roleLabel = activeRoleIdentity.ifBlank { "Unknown" }
+    val aiRuntime = session.aiRuntimeStatus
+    val aiRuntimeLabel = when {
+        aiRuntime == null -> "Status not read"
+        aiRuntime.running -> "${aiSlotLabel(aiRuntime.activeSlot)} running"
+        aiRuntime.requestedEnabled -> "${aiSlotLabel(aiRuntime.activeSlot)} ready"
+        aiRuntime.activeSlot != null -> "${aiSlotLabel(aiRuntime.activeSlot)} selected"
+        else -> "No slot selected"
+    }
+    val ephysImageReady = session.aiResidentSlotStatuses[Ce32Protocol.AiModuleEphysSlot]?.present
+    val imuImageReady = session.aiResidentSlotStatuses[Ce32Protocol.AiModuleImuSlot]?.present
+    val ota = session.bleOta
     ControlCard(
-        title = "Power",
+        title = "Maintenance & roles",
         subtitle = compactUiCopy("", ""),
     ) {
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -7349,7 +9237,64 @@ private fun SystemLifecycleCard(
                 modifier = Modifier.weight(1f),
                 enabled = session.isConnected,
             ) {
-                Text("Request Update")
+                Text("SD Update")
+            }
+        }
+
+        HorizontalDivider(modifier = Modifier.padding(top = 4.dp, bottom = 2.dp))
+        Text(
+            "BLE firmware update",
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Text(
+            "Choose the same single fused CE64 .hex firmware used by the PC console. The app validates and converts it to BLE staging blocks locally.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.68f),
+        )
+        if (ota.hasPreparedPackage) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                InfoPill("Firmware", ota.packageName.ifBlank { "CE64 firmware" }, Modifier.weight(1.4f))
+                InfoPill("Gen", ota.generation.toString(), Modifier.weight(0.55f))
+                InfoPill("State", bleOtaPhaseLabel(ota.phase), Modifier.weight(0.8f))
+            }
+            if (ota.totalBlocks > 0) {
+                Text(
+                    "${ota.completedBlocks}/${ota.totalBlocks} blocks · ${ota.imageBytes / 1024} KB · CRC ${ota.imageCrc32.toString(16).uppercase().padStart(8, '0')}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.68f),
+                )
+            }
+        }
+        Text(
+            ota.failureMessage.ifBlank { ota.statusMessage },
+            style = MaterialTheme.typography.bodySmall,
+            color = if (ota.phase == BleOtaPhase.Failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f),
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            OutlinedButton(
+                onClick = onPickBleOtaPackage,
+                modifier = Modifier.weight(1f),
+                enabled = session.isConnected && ota.phase !in setOf(BleOtaPhase.Staging, BleOtaPhase.Verifying, BleOtaPhase.InstallRequested),
+            ) {
+                Text(if (ota.hasPreparedPackage) "Choose another" else "Choose fused .hex")
+            }
+            val canStage = session.isConnected && ota.totalBlocks > 0 && ota.phase in setOf(BleOtaPhase.PackageReady, BleOtaPhase.Failed)
+            Button(
+                onClick = onRequestStageBleOta,
+                modifier = Modifier.weight(1f),
+                enabled = canStage,
+            ) {
+                Text(if (ota.phase == BleOtaPhase.Staging || ota.phase == BleOtaPhase.Verifying) "Working…" else "Stage & verify")
+            }
+        }
+        if (ota.phase == BleOtaPhase.ReadyToInstall) {
+            Button(
+                onClick = onRequestInstallStagedBleOta,
+                modifier = Modifier.fillMaxWidth(),
+                enabled = session.isConnected,
+            ) {
+                Text("Install verified firmware")
             }
         }
 
@@ -7382,7 +9327,107 @@ private fun SystemLifecycleCard(
                 Text("SLAVE")
             }
         }
+
+        HorizontalDivider(modifier = Modifier.padding(top = 14.dp, bottom = 12.dp))
+
+        Text(
+            "Resident AI runtime",
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Text(
+            "$aiRuntimeLabel · Ephys ${aiImageReadinessLabel(ephysImageReady)} · IMU ${aiImageReadinessLabel(imuImageReady)}",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.68f),
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            OutlinedButton(
+                onClick = onRefreshAiStatus,
+                modifier = Modifier.weight(1f),
+                enabled = session.isConnected,
+            ) {
+                Text("Refresh")
+            }
+            OutlinedButton(
+                onClick = { onSelectAiModule(Ce32Protocol.AiModuleEphysSlot) },
+                modifier = Modifier.weight(1f),
+                enabled = session.isConnected,
+            ) {
+                Text("Use ephys")
+            }
+            OutlinedButton(
+                onClick = { onSelectAiModule(Ce32Protocol.AiModuleImuSlot) },
+                modifier = Modifier.weight(1f),
+                enabled = session.isConnected,
+            ) {
+                Text("Use IMU")
+            }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Button(
+                onClick = { onSetAiRuntimeEnabled(true) },
+                modifier = Modifier.weight(1f),
+                enabled = session.isConnected,
+            ) {
+                Text("Enable AI")
+            }
+            OutlinedButton(
+                onClick = { onSetAiRuntimeEnabled(false) },
+                modifier = Modifier.weight(1f),
+                enabled = session.isConnected,
+            ) {
+                Text("Disable AI")
+            }
+            OutlinedButton(
+                onClick = { onSelectAiModule(null) },
+                modifier = Modifier.weight(1f),
+                enabled = session.isConnected,
+            ) {
+                Text("Detach")
+            }
+        }
+
+        HorizontalDivider(modifier = Modifier.padding(top = 14.dp, bottom = 12.dp))
+
+        Text(
+            "Staged AI module",
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Text(
+            "Activate a module already staged on the device SD card. This request does not transfer model files.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.68f),
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            OutlinedButton(
+                onClick = { onRequestAiModuleInstall(Ce32Protocol.AiModuleEphysSlot, "Ephys") },
+                modifier = Modifier.weight(1f),
+                enabled = session.isConnected,
+            ) {
+                Text("Ephys slot")
+            }
+            OutlinedButton(
+                onClick = { onRequestAiModuleInstall(Ce32Protocol.AiModuleImuSlot, "IMU") },
+                modifier = Modifier.weight(1f),
+                enabled = session.isConnected,
+            ) {
+                Text("IMU slot")
+            }
+        }
     }
+}
+
+private fun aiSlotLabel(slot: Int?): String = when (slot) {
+    Ce32Protocol.AiModuleEphysSlot -> "Ephys AI"
+    Ce32Protocol.AiModuleImuSlot -> "IMU AI"
+    else -> "AI"
+}
+
+private fun aiImageReadinessLabel(ready: Boolean?): String = when (ready) {
+    true -> "ready"
+    false -> "not installed"
+    null -> "unknown"
 }
 
 @Composable
@@ -7502,6 +9547,7 @@ private fun LivePaneSelector(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun ControlLaunchpadCard(
     scope: ControlScope,
@@ -7527,62 +9573,64 @@ private fun ControlLaunchpadCard(
         title = "Control",
         subtitle = subtitle,
     ) {
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            InfoPill(
-                "Target",
-                when (scope) {
-                    ControlScope.ActiveDevice -> "Active"
-                    ControlScope.SelectedDevices -> "Selected"
-                    ControlScope.AllConnected -> "All"
-                },
-                Modifier.weight(1f),
-            )
-            InfoPill("Selected", selectedCount.toString(), Modifier.weight(1f))
-            InfoPill("Page", section.label, Modifier.weight(1f))
+        if (sessions.isNotEmpty()) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                ControlDeviceSelectorChip(
+                    sessions = sessions,
+                    activeSessionId = activeSessionId,
+                    onActivate = onActivate,
+                    modifier = Modifier.weight(1.3f),
+                )
+                CompactDropdownSelector(
+                    currentLabel = section.label,
+                    options = ControlSection.entries.map { it.name to it.label },
+                    selectedOptionName = section.name,
+                    onSelectOption = { onSectionChange(ControlSection.valueOf(it)) },
+                    compact = true,
+                    modifier = Modifier.weight(0.9f),
+                )
+            }
         }
 
         Text(
-            "Target",
-            style = MaterialTheme.typography.titleSmall,
-            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
+            "Apply to",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f),
         )
-        PocketButtonGrid(
-            options = listOf(
-                PocketButtonSpec(
-                    label = "One",
-                    onClick = { onScopeChange(ControlScope.ActiveDevice) },
-                    selected = scope == ControlScope.ActiveDevice,
-                ),
-                PocketButtonSpec(
-                    label = "Sel",
-                    onClick = { onScopeChange(ControlScope.SelectedDevices) },
-                    selected = scope == ControlScope.SelectedDevices,
-                    enabled = selectedCount > 0,
-                ),
-                PocketButtonSpec(
-                    label = "All",
-                    onClick = { onScopeChange(ControlScope.AllConnected) },
-                    selected = scope == ControlScope.AllConnected,
-                    enabled = sessions.isNotEmpty(),
-                ),
-            ),
-        )
-
-        Text(
-            "Pages",
-            style = MaterialTheme.typography.titleSmall,
-            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
-        )
-        PocketButtonGrid(
-            options = ControlSection.entries.map { entry ->
-                PocketButtonSpec(
-                    label = entry.label,
-                    onClick = { onSectionChange(entry) },
-                    selected = section == entry,
-                )
-            },
-            columns = 2,
-        )
+        FlowRow(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            FilterChip(
+                selected = scope == ControlScope.ActiveDevice,
+                onClick = { onScopeChange(ControlScope.ActiveDevice) },
+                enabled = activeSessionId != null,
+                label = { Text("This device") },
+            )
+            FilterChip(
+                selected = scope == ControlScope.SelectedDevices,
+                onClick = { onScopeChange(ControlScope.SelectedDevices) },
+                enabled = sessions.any { it.isConnected },
+                label = {
+                    Text(
+                        if (selectedCount > 0) "Selected $selectedCount" else "Choose devices",
+                    )
+                },
+            )
+            FilterChip(
+                selected = scope == ControlScope.AllConnected,
+                onClick = { onScopeChange(ControlScope.AllConnected) },
+                enabled = sessions.any { it.isConnected },
+                label = {
+                    Text("All ${sessions.count { it.isConnected }}")
+                },
+            )
+        }
 
         if (reconnectNote != null && sessions.isNotEmpty()) {
             Text(
@@ -7597,22 +9645,6 @@ private fun ControlLaunchpadCard(
                 reconnectNote ?: "Connect a device to use controls.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f),
-            )
-        } else {
-            InfoPill("Active Device", activeSessionName ?: sessions.first().name, Modifier.fillMaxWidth())
-            FocusSessionGrid(
-                sessions = sessions,
-                activeSessionId = activeSessionId,
-                helperText = "Tap a device tile to change the focused control source without leaving the control page.",
-                subtitleForSession = { candidate ->
-                    buildString {
-                        append(compactSessionStateLabel(candidate))
-                        if (candidate.id == activeSessionId) {
-                            append(" | Focused")
-                        }
-                    }
-                },
-                onActivate = onActivate,
             )
         }
     }
@@ -7665,13 +9697,8 @@ private fun ActiveDeviceSelectorCard(
 }
 
 private fun shouldShowTargetSelectionCard(uiState: WildUiState): Boolean {
-    if (uiState.connectedSessions.isEmpty()) {
-        return false
-    }
-
-    return uiState.connectedSessions.size > 1 ||
-        uiState.controlScope == ControlScope.SelectedDevices ||
-        uiState.selectedConnectedSessions.isNotEmpty()
+    return uiState.connectedSessions.isNotEmpty() &&
+        uiState.controlScope == ControlScope.SelectedDevices
 }
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -7877,12 +9904,12 @@ private fun CompactDevicePreviewSourceSelector(
         currentLabel = compactPreviewSourceLabel(
             normalizedSelection,
             session.parsedSystemParams?.ephysChannelCount,
-        ),
+        ).let { "Source: $it" },
         canStepDown = session.isConnected && optionCount > 1,
         canStepUp = session.isConnected && optionCount > 1,
-        minWidth = 62.dp,
-        maxWidth = 84.dp,
-        buttonSize = 15.dp,
+        minWidth = 168.dp,
+        maxWidth = 210.dp,
+        buttonSize = 48.dp,
         onLabelClick = {
             if (!session.isConnected) {
                 return@PreviewCompactStepperChip
@@ -8052,10 +10079,12 @@ private fun SingleDeviceControlSelectorRow(
     section: ControlSection,
     acquisitionPane: AcquisitionPane,
     closedLoopPane: ClosedLoopPane,
+    analysisPane: AnalysisPane,
     systemPane: SystemPane,
     onSectionChange: (ControlSection) -> Unit,
     onAcquisitionPaneChange: (AcquisitionPane) -> Unit,
     onClosedLoopPaneChange: (ClosedLoopPane) -> Unit,
+    onAnalysisPaneChange: (AnalysisPane) -> Unit,
     onSystemPaneChange: (SystemPane) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -8093,6 +10122,15 @@ private fun SingleDeviceControlSelectorRow(
                 modifier = Modifier.weight(1.05f),
             )
 
+            ControlSection.Analysis -> CompactDropdownSelector(
+                currentLabel = analysisPane.label,
+                options = AnalysisPane.entries.map { it.name to it.label },
+                selectedOptionName = analysisPane.name,
+                onSelectOption = { onAnalysisPaneChange(AnalysisPane.valueOf(it)) },
+                compact = true,
+                modifier = Modifier.weight(1.05f),
+            )
+
             ControlSection.System -> CompactDropdownSelector(
                 currentLabel = systemPane.label,
                 options = SystemPane.entries.map { it.name to it.label },
@@ -8126,6 +10164,7 @@ private fun CompactDropdownSelector(
             color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.42f),
             modifier = Modifier
                 .fillMaxWidth()
+                .heightIn(min = 48.dp)
                 .border(
                     width = 1.dp,
                     color = MaterialTheme.colorScheme.outline.copy(alpha = 0.22f),
@@ -8552,6 +10591,7 @@ private fun OnlineLaneHeaderCard(
                 contentDescription = sessionLinkActionLabel(session),
                 enabled = sessionLinkActionEnabled(session),
                 filled = false,
+                label = sessionLinkActionLabel(session),
                 tint = if (session.isConnected || session.isLinkingLike) Color(0xFFD64545) else MaterialTheme.colorScheme.primary,
                 buttonSize = 34.dp,
                 onClick = onLinkAction,
@@ -8562,6 +10602,7 @@ private fun OnlineLaneHeaderCard(
                     contentDescription = "Resync",
                     enabled = true,
                     filled = false,
+                    label = "Sync",
                     buttonSize = 34.dp,
                     onClick = onResync,
                 )
@@ -8854,9 +10895,9 @@ private fun SignalMonitorCompanionCard(
                 onClick = onResync,
                 enabled = session.isConnected,
             )
-            if (onResyncNoRtc != null) {
+            if (SHOW_UI_DESCRIPTIONS && onResyncNoRtc != null) {
                 CompactActionChip(
-                    label = "No RTC",
+                    label = "Resync (no RTC write)",
                     onClick = onResyncNoRtc,
                     enabled = session.isConnected,
                 )
@@ -8914,7 +10955,7 @@ private fun SignalOnlineToolkitCard(
         session.previewSelection.normalizedForDevice(parsed?.ephysChannelCount),
         parsed?.ephysChannelCount,
     )
-    val currentRate = parsed?.ephysSamplingRate?.takeIf { it > 0 } ?: 1250
+    val currentRate = parsed?.ephysSamplingRate?.takeIf { it >= 0 } ?: 1250
     var requestedRateText by remember(session.id) {
         mutableStateOf(currentRate.toString())
     }
@@ -8934,7 +10975,7 @@ private fun SignalOnlineToolkitCard(
         mutableStateOf(parsed?.cameraRatio?.toString() ?: "0")
     }
     LaunchedEffect(session.id, parsed?.ephysSamplingRate) {
-        requestedRateText = (parsed?.ephysSamplingRate?.takeIf { it > 0 } ?: currentRate).toString()
+        requestedRateText = (parsed?.ephysSamplingRate?.takeIf { it >= 0 } ?: currentRate).toString()
     }
     LaunchedEffect(session.id, parsed?.cameraEnabled, parsed?.adcEnabled) {
         cameraEnabled = parsed?.cameraEnabled == true
@@ -9050,7 +11091,7 @@ private fun SignalOnlineToolkitCard(
                         requestedRateText = next.take(6)
                     }
                 },
-                label = { Text("FS Hz") },
+                label = { Text("FS / ephys rate (0 = Off)") },
                 enabled = session.isConnected,
                 modifier = Modifier.fillMaxWidth(),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
@@ -9094,7 +11135,7 @@ private fun SignalOnlineToolkitCard(
                             onQuickSetFs(rate)
                         }
                     },
-                    enabled = targetCount > 0 && session.isConnected && requestedRate != null && requestedRate > 0,
+                    enabled = targetCount > 0 && session.isConnected && requestedRate != null && requestedRate in 0..0xFFFF,
                     emphasized = true,
                 )
             }
@@ -9219,7 +11260,7 @@ private fun CompactPayloadFleetCard(
     var showStreamEditor by rememberSaveable(session.id) { mutableStateOf(false) }
     var showSystemEditor by rememberSaveable(session.id) { mutableStateOf(false) }
     var requestedRateText by remember(session.id) {
-        mutableStateOf(parsed?.ephysSamplingRate?.takeIf { it > 0 }?.toString() ?: "1250")
+        mutableStateOf(parsed?.ephysSamplingRate?.takeIf { it >= 0 }?.toString() ?: "1250")
     }
     var cameraEnabled by remember(session.id) {
         mutableStateOf(parsed?.cameraEnabled == true)
@@ -9237,7 +11278,7 @@ private fun CompactPayloadFleetCard(
         mutableStateOf(parsed?.cameraRatio?.toString() ?: "0")
     }
     LaunchedEffect(session.id, parsed?.ephysSamplingRate, parsed?.cameraEnabled, parsed?.adcEnabled) {
-        requestedRateText = parsed?.ephysSamplingRate?.takeIf { it > 0 }?.toString() ?: requestedRateText
+        requestedRateText = parsed?.ephysSamplingRate?.takeIf { it >= 0 }?.toString() ?: requestedRateText
         cameraEnabled = parsed?.cameraEnabled == true
         adcEnabled = parsed?.adcEnabled == true
     }
@@ -9252,7 +11293,7 @@ private fun CompactPayloadFleetCard(
     val vbattThresholdRaw = vbattThresholdText.toIntOrNull()
     val audioRatio = audioRatioText.toIntOrNull()
     val cameraRatio = cameraRatioText.toIntOrNull()
-    val ratePresets = (listOfNotNull(parsed?.ephysSamplingRate?.takeIf { it > 0 }) + Ce32Protocol.CommonEphysRates)
+    val ratePresets = (listOfNotNull(parsed?.ephysSamplingRate?.takeIf { it >= 0 }) + Ce32Protocol.CommonEphysRates)
         .distinct()
         .sorted()
 
@@ -9374,7 +11415,7 @@ private fun CompactPayloadFleetCard(
                         requestedRateText = next.take(6)
                     }
                 },
-                label = { Text("FS Hz") },
+                label = { Text("FS / ephys rate (0 = Off)") },
                 enabled = session.isConnected,
                 modifier = Modifier.fillMaxWidth(),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
@@ -9414,7 +11455,7 @@ private fun CompactPayloadFleetCard(
                         val nextRate = requestedRate ?: return@CompactActionChip
                         onQuickSetFs(nextRate)
                     },
-                    enabled = session.isConnected && requestedRate != null && requestedRate > 0,
+                    enabled = session.isConnected && requestedRate != null && requestedRate in 0..0xFFFF,
                 )
                 CompactActionChip(
                     label = "Apply Stream",
@@ -9422,7 +11463,7 @@ private fun CompactPayloadFleetCard(
                         val nextRate = requestedRate ?: return@CompactActionChip
                         onApplyStreamRates(nextRate, cameraEnabled, adcEnabled)
                     },
-                    enabled = session.isConnected && parsed != null && requestedRate != null && requestedRate > 0,
+                    enabled = session.isConnected && parsed != null && requestedRate != null && requestedRate in 0..0xFFFF,
                     emphasized = true,
                 )
             }
@@ -9912,6 +11953,7 @@ private fun ConnectedMiniCard(
     val canStopPreview = hasLivePreviewControl(session)
     val canStartRecording = canStartLiveRecording(session)
     val canStopRecording = canStopLiveRecording(session)
+    val stopConfirmationPending = session.hostState == BleHostSessionState.StoppingRecording
     var expanded by rememberSaveable(session.id, pane.name) { mutableStateOf(false) }
     val detailLine = formatSyncCompactLineAscii(session.lastSyncMetric, session.liveSync)
         ?: session.bleLinkStats?.let(::formatBleLinkCompactLine)
@@ -9972,6 +12014,7 @@ private fun ConnectedMiniCard(
                     contentDescription = if (isActive) "Active device" else "Focus device",
                     enabled = !isActive,
                     filled = isActive,
+                    label = if (isActive) "Active" else "Focus",
                     buttonSize = 34.dp,
                     onClick = onFocus,
                 )
@@ -9983,6 +12026,7 @@ private fun ConnectedMiniCard(
                             contentDescription = "Resync device",
                             enabled = session.isConnected,
                             filled = false,
+                            label = "Sync",
                             buttonSize = 34.dp,
                             onClick = onResync,
                         )
@@ -9993,6 +12037,7 @@ private fun ConnectedMiniCard(
                             contentDescription = if (session.cameraPreviewStreaming) "Stop camera live" else "Start camera live",
                             enabled = session.isConnected,
                             filled = session.cameraPreviewStreaming,
+                            label = if (session.cameraPreviewStreaming) "Stop camera" else "Camera",
                             buttonSize = 34.dp,
                             onClick = { onSetCameraPreviewStreaming(!session.cameraPreviewStreaming) },
                         )
@@ -10003,6 +12048,7 @@ private fun ConnectedMiniCard(
                     contentDescription = if (expanded) "Hide extra device controls" else "Show extra device controls",
                     enabled = true,
                     filled = expanded,
+                    label = if (expanded) "Less" else "Details",
                     buttonSize = 34.dp,
                     onClick = { expanded = !expanded },
                 )
@@ -10017,13 +12063,13 @@ private fun ConnectedMiniCard(
                     ) {
                         Text("Resync")
                     }
-                    if (onResyncNoRtc != null) {
+                    if (SHOW_UI_DESCRIPTIONS && onResyncNoRtc != null) {
                         TextButton(
                             onClick = onResyncNoRtc,
                             modifier = Modifier.weight(1f),
                             enabled = session.isConnected,
                         ) {
-                            Text("No RTC")
+                            Text("Resync (no RTC write)")
                         }
                     }
                 }
@@ -10035,6 +12081,8 @@ private fun ConnectedMiniCard(
                     Text("Impedance")
                 }
             }
+
+            ConnectedDeviceInfoBand(session)
 
             when (pane) {
                 FleetPane.Operate -> {
@@ -10055,17 +12103,23 @@ private fun ConnectedMiniCard(
                         )
                         PreviewTransportButton(
                             icon = if (canStopPreview) Icons.Outlined.Stop else Icons.Outlined.PlayArrow,
-                            contentDescription = if (canStopPreview) "Stop preview" else "Start preview",
+                            contentDescription = if (canStopPreview) "Stop live signal" else "Start live signal",
                             enabled = canStartPreview || canStopPreview,
                             filled = canStopPreview,
+                            label = if (canStopPreview) "Stop live" else "Live",
                             buttonSize = 34.dp,
                             onClick = if (canStopPreview) onStopPreview else onStartPreview,
                         )
                         PreviewTransportButton(
                             icon = if (canStopRecording) Icons.Outlined.Stop else Icons.Outlined.FiberManualRecord,
-                            contentDescription = if (canStopRecording) "Stop recording" else "Start recording",
+                            contentDescription = when {
+                                stopConfirmationPending -> "Retry pending recording stop"
+                                canStopRecording -> "Stop recording"
+                                else -> "Start recording"
+                            },
                             enabled = canStartRecording || canStopRecording,
                             filled = canStopRecording,
+                            label = if (canStopRecording) "Stop rec" else "Record",
                             tint = Color(0xFFD64545),
                             buttonSize = 34.dp,
                             onClick = if (canStopRecording) onStopRecording else onStartRecording,
@@ -10086,7 +12140,7 @@ private fun ConnectedMiniCard(
                             modifier = Modifier.fillMaxWidth(),
                             enabled = session.isConnected,
                         ) {
-                            Text("Force Stop")
+                            Text(if (stopConfirmationPending) "Retry Stop" else "Force Stop")
                         }
                     }
                 }
@@ -10209,6 +12263,20 @@ private fun ConnectedMiniCard(
                 }
             }
         }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ConnectedDeviceInfoBand(session: DeviceSessionUiState) {
+    FlowRow(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        InfoPill("BLE", session.address)
+        InfoPill("Battery", formatConnectedBatteryLabel(session))
+        InfoPill("Used storage", formatUsedSpaceLabel(session.usedSpaceMb).let { value -> if (value == "--") "Not reported" else value })
+        InfoPill("Firmware", formatDeviceFirmwareLabel(session))
     }
 }
 
@@ -10349,20 +12417,20 @@ private fun SessionMonitorCard(
             ) {
                 Text("Resync")
             }
-            if (onResyncNoRtc != null) {
+            if (SHOW_UI_DESCRIPTIONS && onResyncNoRtc != null) {
                 OutlinedButton(
                     onClick = onResyncNoRtc,
                     modifier = Modifier.weight(1f),
                     enabled = session.isConnected,
                 ) {
-                    Text("No RTC")
+                    Text("Resync (no RTC write)")
                 }
             }
         }
 
         if (SHOW_UI_DESCRIPTIONS && onResyncNoRtc != null) {
             Text(
-                "No RTC resets sync without pushing a fresh host RTC write first, which is useful when you want to inspect recovery from the diagnostics page.",
+                "Resync without RTC write resets sync without pushing a fresh host RTC value first. Use it only while inspecting recovery from diagnostics.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.64f),
             )
@@ -10531,20 +12599,20 @@ private fun SessionActivityCard(
             ) {
                 Text("Resync")
             }
-            if (onResyncNoRtc != null) {
+            if (SHOW_UI_DESCRIPTIONS && onResyncNoRtc != null) {
                 OutlinedButton(
                     onClick = onResyncNoRtc,
                     modifier = Modifier.weight(1f),
                     enabled = session.isConnected,
                 ) {
-                    Text("No RTC")
+                    Text("Resync (no RTC write)")
                 }
             }
         }
 
         if (SHOW_UI_DESCRIPTIONS && onResyncNoRtc != null) {
             Text(
-                "No RTC keeps the sync-reset-without-RTC-write recovery path available while you inspect recent session activity.",
+                "Resync without RTC write keeps the sync-recovery path available while you inspect recent session activity.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.64f),
             )
@@ -10690,20 +12758,20 @@ private fun SessionLinkCard(
             ) {
                 Text("Resync")
             }
-            if (onResyncNoRtc != null) {
+            if (SHOW_UI_DESCRIPTIONS && onResyncNoRtc != null) {
                 OutlinedButton(
                     onClick = onResyncNoRtc,
                     modifier = Modifier.weight(1f),
                     enabled = session.isConnected,
                 ) {
-                    Text("No RTC")
+                    Text("Resync (no RTC write)")
                 }
             }
         }
 
         if (SHOW_UI_DESCRIPTIONS && onResyncNoRtc != null) {
             Text(
-                "No RTC gives the same sync-reset-without-RTC-write path here, so transport troubleshooting does not require backing out to another page.",
+                "Resync without RTC write keeps the sync-recovery path available here for transport troubleshooting.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.64f),
             )
@@ -10789,9 +12857,9 @@ private fun CompactSessionMonitorCard(
                 onClick = onResync,
                 enabled = session.isConnected,
             )
-            if (onResyncNoRtc != null) {
+            if (SHOW_UI_DESCRIPTIONS && onResyncNoRtc != null) {
                 CompactActionChip(
-                    label = "No RTC",
+                    label = "Resync (no RTC write)",
                     onClick = onResyncNoRtc,
                     enabled = session.isConnected,
                 )
@@ -10877,9 +12945,9 @@ private fun CompactSessionLinkCard(
                 onClick = onResync,
                 enabled = session.isConnected,
             )
-            if (onResyncNoRtc != null) {
+            if (SHOW_UI_DESCRIPTIONS && onResyncNoRtc != null) {
                 CompactActionChip(
-                    label = "No RTC",
+                    label = "Resync (no RTC write)",
                     onClick = onResyncNoRtc,
                     enabled = session.isConnected,
                 )
@@ -10950,9 +13018,9 @@ private fun CompactSessionActivityCard(
                 onClick = onResync,
                 enabled = session.isConnected,
             )
-            if (onResyncNoRtc != null) {
+            if (SHOW_UI_DESCRIPTIONS && onResyncNoRtc != null) {
                 CompactActionChip(
-                    label = "No RTC",
+                    label = "Resync (no RTC write)",
                     onClick = onResyncNoRtc,
                     enabled = session.isConnected,
                 )
@@ -11172,11 +13240,20 @@ private fun sessionHasPayloadCache(session: DeviceSessionUiState): Boolean {
         session.dsp2ParamHex.isNotBlank()
 }
 
-private fun sessionHasControlLaunchCache(session: DeviceSessionUiState): Boolean {
+internal fun sessionHasControlLaunchCorePayload(session: DeviceSessionUiState): Boolean {
     return (session.parsedSystemParams != null || session.systemParamHex.isNotBlank()) &&
         (session.parsedDsp1Params != null || session.dsp1ParamHex.isNotBlank()) &&
-        (session.parsedDsp2Params != null || session.dsp2ParamHex.isNotBlank()) &&
-        (session.parsedCameraParams != null || session.cameraParamHex.isNotBlank())
+        (session.parsedDsp2Params != null || session.dsp2ParamHex.isNotBlank())
+}
+
+internal fun sessionHasCameraControlPayload(session: DeviceSessionUiState): Boolean {
+    return session.parsedCameraParams != null || session.cameraParamHex.isNotBlank()
+}
+
+internal fun shouldReadCameraDuringControlLaunch(session: DeviceSessionUiState): Boolean {
+    return session.isConnected &&
+        sessionHasControlLaunchCorePayload(session) &&
+        !sessionHasCameraControlPayload(session)
 }
 
 private fun sessionHasCameraCache(session: DeviceSessionUiState): Boolean {
@@ -11453,18 +13530,35 @@ private fun readinessValue(readyCount: Int, targetCount: Int): String {
     }
 }
 
-private fun canStartLivePreview(session: DeviceSessionUiState): Boolean {
+internal fun canStartLivePreview(session: DeviceSessionUiState): Boolean {
     return session.hostState == BleHostSessionState.Connected ||
         session.hostState == BleHostSessionState.Syncing ||
-        session.hostState == BleHostSessionState.Synced
+        session.hostState == BleHostSessionState.Synced ||
+        (
+            !session.waveformPreviewActive &&
+                session.hostState in setOf(
+                    BleHostSessionState.StartingRecording,
+                    BleHostSessionState.Recording,
+                )
+            )
 }
 
-private fun hasLivePreviewControl(session: DeviceSessionUiState): Boolean {
-    return session.hostState == BleHostSessionState.Previewing
+internal fun hasLivePreviewControl(session: DeviceSessionUiState): Boolean {
+    return session.hostState == BleHostSessionState.Previewing ||
+        session.waveformPreviewActive ||
+        (
+            session.recorderBackedLiveSignal &&
+                session.hostState in setOf(
+                    BleHostSessionState.StartingRecording,
+                    BleHostSessionState.Recording,
+                )
+            )
 }
 
 private fun canStartLiveRecording(session: DeviceSessionUiState): Boolean {
-    return session.hostState == BleHostSessionState.Synced ||
+    return session.hostState == BleHostSessionState.Connected ||
+        session.hostState == BleHostSessionState.Syncing ||
+        session.hostState == BleHostSessionState.Synced ||
         session.hostState == BleHostSessionState.Previewing
 }
 
@@ -11516,6 +13610,13 @@ private fun buildLiveActionSummary(sessions: List<DeviceSessionUiState>): LiveAc
         previewStartCount = if (previewStartBlockedByScope) 0 else sessions.count(::canStartLivePreview),
         previewStopCount = sessions.count(::hasLivePreviewControl),
         recordingStartCount = if (recordingStartBlockedByScope) 0 else sessions.count(::canStartLiveRecording),
+        recordingActiveCount = sessions.count { session ->
+            session.hostState == BleHostSessionState.StartingRecording ||
+                session.hostState == BleHostSessionState.Recording
+        },
+        recordingStopPendingCount = sessions.count { session ->
+            session.hostState == BleHostSessionState.StoppingRecording
+        },
         recordingStopCount = sessions.count(::canStopLiveRecording),
         canRunPreviewGroupResync = canPreviewGroupResync,
         previewStartBlockedByScope = previewStartBlockedByScope,
@@ -11755,12 +13856,16 @@ private fun formatSignalWindowSeconds(seconds: Float): String {
     return String.format(Locale.US, "%.1f", seconds)
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SignalPlotCard(
     sessions: List<DeviceSessionUiState>,
+    allConnectedSessions: List<DeviceSessionUiState>,
+    commandScopeLabel: String,
     activeSessionId: String?,
     onActivateSession: (String) -> Unit,
-    onResync: () -> Unit,
+    onOpenDevices: () -> Unit,
+    onOpenOperate: () -> Unit,
     onSetPreviewSelection: (String, PreviewSelection) -> Unit,
     displayConfig: SignalDisplayConfig,
     onWindowChange: (SignalWindowPreset) -> Unit,
@@ -11771,23 +13876,25 @@ private fun SignalPlotCard(
     onStopPreview: () -> Unit,
     onStartRecording: () -> Unit,
     onStopRecording: () -> Unit,
+    onStartAllPreview: () -> Unit,
+    onStopAllPreview: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val actionSummary = buildLiveActionSummary(sessions)
+    val allConnectedActionSummary = buildLiveActionSummary(allConnectedSessions)
     val sessionKey = sessions.joinToString(separator = "|") { it.id }
     val activeSession = sessions.firstOrNull { it.id == activeSessionId } ?: sessions.firstOrNull()
     val configuration = LocalConfiguration.current
     val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
     var gestureOffset by rememberSaveable(sessionKey) { mutableStateOf(0f) }
     var scanBacktrackWindows by rememberSaveable(sessionKey) { mutableStateOf(0f) }
-    var pinchZoomAccumulator by rememberSaveable(sessionKey) { mutableStateOf(1f) }
     val telemetrySession = activeSession ?: sessions.firstOrNull()
+    var displaySettingsVisible by rememberSaveable(sessionKey) { mutableStateOf(false) }
     val maxScanBacktrackWindows = activeSession?.let { session ->
         maxPreviewScanBacktrackWindows(session, displayConfig.window)
     } ?: 0f
     LaunchedEffect(sessionKey, displayConfig.window.name, maxScanBacktrackWindows) {
         scanBacktrackWindows = scanBacktrackWindows.coerceIn(0f, maxScanBacktrackWindows)
-        pinchZoomAccumulator = 1f
     }
     val plottedSessions = sessions.map { session ->
         session to preparePreviewTraceForDisplay(
@@ -11805,6 +13912,8 @@ private fun SignalPlotCard(
         append(displayConfig.window.label)
         append("  Y ")
         append(displayConfig.gain.label)
+        append("  Offset ")
+        append(formatWaveformOffsetLabel(gestureOffset))
         if (displayConfig.removeDc) {
             append("  HPF")
         }
@@ -11819,7 +13928,8 @@ private fun SignalPlotCard(
     }
     val waveformReadout = zoomReadout
     val gridLineColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.25f)
-    val waveformBottomInset = if (isLandscape) 52.dp else 58.dp
+    // Keep data traces clear of the explicit transport controls rather than drawing beneath them.
+    val waveformBottomInset = if (isLandscape) 74.dp else 228.dp
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         shape = RoundedCornerShape(20.dp),
@@ -11845,36 +13955,306 @@ private fun SignalPlotCard(
             onGestureOffsetChange = { gestureOffset = it },
             scanBacktrackWindows = scanBacktrackWindows,
             onScanBacktrackWindowsChange = { scanBacktrackWindows = it },
-            pinchZoomAccumulator = pinchZoomAccumulator,
-            onPinchZoomAccumulatorChange = { pinchZoomAccumulator = it },
             onWindowChange = onWindowChange,
-            trailingOverlayContent = activeSession?.let { session ->
-                {
-                    PreviewAdjustmentRail(
-                        session = session,
-                        displayConfig = displayConfig,
-                        onWindowChange = onWindowChange,
-                        onGainChange = onGainChange,
-                        onRemoveDcChange = onRemoveDcChange,
-                        onSetPreviewSelection = { selection ->
-                            onSetPreviewSelection(session.id, selection)
-                        },
-                    )
+            onGainChange = onGainChange,
+            trailingOverlayContent = {
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    horizontalAlignment = Alignment.End,
+                ) {
+                    OutlinedButton(
+                        onClick = onOpenDevices,
+                        modifier = Modifier.heightIn(min = 54.dp),
+                    ) {
+                        Text("Devices")
+                    }
+                    activeSession?.let {
+                    OutlinedButton(
+                        onClick = { displaySettingsVisible = true },
+                        modifier = Modifier.heightIn(min = 54.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.Tune,
+                            contentDescription = null,
+                            modifier = Modifier.size(20.dp),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Column(horizontalAlignment = Alignment.Start) {
+                            Text("Display", style = MaterialTheme.typography.labelLarge)
+                            Text(
+                                "${displayConfig.window.label} · ${displayConfig.gain.label}",
+                                style = MaterialTheme.typography.labelSmall,
+                            )
+                        }
+                    }
+                    }
                 }
             },
             bottomOverlayContent = {
                 PreviewCompactControlStrip(
                     actionSummary = actionSummary,
-                    canResync = sessions.any { it.isConnected },
-                    onResync = onResync,
+                    allConnectedActionSummary = allConnectedActionSummary,
+                    allConnectedDeviceCount = allConnectedSessions.size,
+                    commandScopeLabel = commandScopeLabel,
+                    activeSessionName = activeSession?.name,
                     isLandscape = isLandscape,
                     onStartPreview = onStartPreview,
                     onStopPreview = onStopPreview,
                     onStartRecording = onStartRecording,
                     onStopRecording = onStopRecording,
+                    onStartAllPreview = onStartAllPreview,
+                    onStopAllPreview = onStopAllPreview,
+                    onOpenOperate = onOpenOperate,
                 )
             },
         )
+    }
+
+    if (displaySettingsVisible && activeSession != null) {
+        DisplaySettingsSheet(
+            session = activeSession,
+            displayConfig = displayConfig,
+            onDismiss = { displaySettingsVisible = false },
+            onWindowChange = onWindowChange,
+            onGainChange = onGainChange,
+            onRemoveDcChange = onRemoveDcChange,
+            onSetPreviewSelection = { selection ->
+                onSetPreviewSelection(activeSession.id, selection)
+            },
+        )
+    }
+}
+
+@Composable
+private fun DisplaySettingsSheet(
+    session: DeviceSessionUiState,
+    displayConfig: SignalDisplayConfig,
+    onDismiss: () -> Unit,
+    onWindowChange: (SignalWindowPreset) -> Unit,
+    onGainChange: (SignalGainPreset) -> Unit,
+    onRemoveDcChange: (Boolean) -> Unit,
+    onSetPreviewSelection: (PreviewSelection) -> Unit,
+) {
+    val channelCount = session.parsedSystemParams?.ephysChannelCount
+    val selection = session.previewSelection.normalizedForDevice(channelCount)
+    val sourceOptionCount = selection.optionCount(channelCount)
+    val isLandscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
+    var windowMenuVisible by remember(session.id) { mutableStateOf(false) }
+    var gainMenuVisible by remember(session.id) { mutableStateOf(false) }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Surface(
+            shape = RoundedCornerShape(28.dp),
+            tonalElevation = 6.dp,
+            shadowElevation = 12.dp,
+            modifier = Modifier
+                .fillMaxWidth(if (isLandscape) 0.78f else 0.94f)
+                .widthIn(max = 880.dp),
+        ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(24.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Text("Display settings", style = MaterialTheme.typography.headlineSmall)
+                    Text(
+                        compactDeviceUiLabel(session.name, session.address),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                Button(
+                    onClick = onDismiss,
+                    modifier = Modifier.heightIn(min = 52.dp),
+                ) {
+                    Text("Done")
+                }
+            }
+
+            Text(
+                text = "Gestures: pinch horizontally for time scale, pinch vertically for gain, and swipe vertically to move the trace.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.68f),
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Text("Signal source", style = MaterialTheme.typography.titleSmall)
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        FilterChip(
+                            selected = !selection.auxMode,
+                            onClick = {
+                                onSetPreviewSelection(
+                                    PreviewSelection(auxMode = false, index = 0).normalizedForDevice(channelCount),
+                                )
+                            },
+                            label = { Text("Electrode") },
+                            modifier = Modifier.heightIn(min = 48.dp),
+                        )
+                        FilterChip(
+                            selected = selection.auxMode,
+                            onClick = {
+                                onSetPreviewSelection(
+                                    PreviewSelection(auxMode = true, index = 0).normalizedForDevice(channelCount),
+                                )
+                            },
+                            label = { Text("Auxiliary") },
+                            modifier = Modifier.heightIn(min = 48.dp),
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        OutlinedIconButton(
+                            onClick = {
+                                onSetPreviewSelection(
+                                    shiftPreviewSelection(selection, -1, channelCount),
+                                )
+                            },
+                            enabled = sourceOptionCount > 1,
+                            modifier = Modifier.size(52.dp),
+                        ) {
+                            Icon(Icons.Outlined.Remove, contentDescription = "Previous signal source")
+                        }
+                        Surface(
+                            shape = RoundedCornerShape(14.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.64f),
+                            modifier = Modifier
+                                .weight(1f)
+                                .heightIn(min = 52.dp),
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Text(
+                                    selection.label(channelCount),
+                                    style = MaterialTheme.typography.titleSmall,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        }
+                        OutlinedIconButton(
+                            onClick = {
+                                onSetPreviewSelection(
+                                    shiftPreviewSelection(selection, 1, channelCount),
+                                )
+                            },
+                            enabled = sourceOptionCount > 1,
+                            modifier = Modifier.size(52.dp),
+                        ) {
+                            Icon(Icons.Outlined.Add, contentDescription = "Next signal source")
+                        }
+                    }
+                }
+
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Text("Waveform scale", style = MaterialTheme.typography.titleSmall)
+                    Box(modifier = Modifier.fillMaxWidth()) {
+                        OutlinedButton(
+                            onClick = { windowMenuVisible = true },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 52.dp),
+                        ) {
+                            Text("Time window  ·  ${displayConfig.window.label}")
+                            Icon(
+                                imageVector = Icons.Outlined.ArrowDropDown,
+                                contentDescription = null,
+                                modifier = Modifier.size(20.dp),
+                            )
+                        }
+                        DropdownMenu(
+                            expanded = windowMenuVisible,
+                            onDismissRequest = { windowMenuVisible = false },
+                        ) {
+                            SignalWindowPreset.entries.forEach { option ->
+                                DropdownMenuItem(
+                                    text = { Text(option.label) },
+                                    onClick = {
+                                        windowMenuVisible = false
+                                        onWindowChange(option)
+                                    },
+                                )
+                            }
+                        }
+                    }
+                    Box(modifier = Modifier.fillMaxWidth()) {
+                        OutlinedButton(
+                            onClick = { gainMenuVisible = true },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 52.dp),
+                        ) {
+                            Text("Amplitude  ·  ${displayConfig.gain.label}")
+                            Icon(
+                                imageVector = Icons.Outlined.ArrowDropDown,
+                                contentDescription = null,
+                                modifier = Modifier.size(20.dp),
+                            )
+                        }
+                        DropdownMenu(
+                            expanded = gainMenuVisible,
+                            onDismissRequest = { gainMenuVisible = false },
+                        ) {
+                            SignalGainPreset.entries.forEach { option ->
+                                DropdownMenuItem(
+                                    text = { Text(option.label) },
+                                    onClick = {
+                                        gainMenuVisible = false
+                                        onGainChange(option)
+                                    },
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            FilledTonalButton(
+                onClick = { onRemoveDcChange(!displayConfig.removeDc) },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 52.dp),
+            ) {
+                Icon(Icons.Outlined.FilterAlt, contentDescription = null)
+                Spacer(Modifier.width(10.dp))
+                Text(
+                    if (displayConfig.removeDc) {
+                        "High-pass correction  ·  On"
+                    } else {
+                        "High-pass correction  ·  Off"
+                    },
+                )
+            }
+        }
+        }
     }
 }
 
@@ -11896,9 +14276,8 @@ private fun PreviewWaveformPanel(
     onGestureOffsetChange: (Float) -> Unit,
     scanBacktrackWindows: Float,
     onScanBacktrackWindowsChange: (Float) -> Unit,
-    pinchZoomAccumulator: Float,
-    onPinchZoomAccumulatorChange: (Float) -> Unit,
     onWindowChange: (SignalWindowPreset) -> Unit,
+    onGainChange: (SignalGainPreset) -> Unit,
     trailingOverlayContent: (@Composable () -> Unit)? = null,
     bottomOverlayContent: (@Composable () -> Unit)? = null,
     modifier: Modifier = Modifier,
@@ -11906,42 +14285,74 @@ private fun PreviewWaveformPanel(
     val configuration = LocalConfiguration.current
     val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
     val effectiveSignalViewMode = if (plottedSessions.size > 1) signalViewMode else SignalViewMode.Stacked
-    BoxWithConstraints(
+    Box(
         modifier = modifier
             .background(
                 color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
                 shape = RoundedCornerShape(20.dp),
             )
-            .pointerInput(sessionKey, activeSessionId, displayConfig.window.name, displayConfig.gain.label, maxScanBacktrackWindows) {
-                detectTransformGestures { _, pan, zoom, _ ->
-                    onGestureOffsetChange((gestureOffset + pan.y / size.height).coerceIn(-1.2f, 1.2f))
-                    if (size.width > 0 && abs(pan.x) > 0f && maxScanBacktrackWindows > 0f) {
-                        val deltaWindows = (-pan.x / size.width).coerceIn(-1f, 1f)
-                        onScanBacktrackWindowsChange((scanBacktrackWindows + deltaWindows).coerceIn(0f, maxScanBacktrackWindows))
-                    }
-                    if (zoom != 1f) {
-                        val nextAccumulator = pinchZoomAccumulator * zoom
-                        when {
-                            nextAccumulator > 1.12f -> {
-                                val nextWindow = displayConfig.window.step(-1)
-                                if (nextWindow != displayConfig.window) {
-                                    onWindowChange(nextWindow)
-                                }
-                                onPinchZoomAccumulatorChange(1f)
-                            }
+            .pointerInput(sessionKey, activeSessionId, displayConfig.window.name, displayConfig.gain.name) {
+                awaitEachGesture {
+                    // Let controls layered over the waveform consume their own touches first.
+                    // Unconsumed touches still drive waveform pinch and offset gestures.
+                    awaitFirstDown(requireUnconsumed = true)
+                    val pinchStepDistance = 32.dp.toPx()
+                    var horizontalPinchDistance = 0f
+                    var verticalPinchDistance = 0f
+                    var gestureActive = true
+                    while (gestureActive) {
+                        val event = awaitPointerEvent()
+                        val activeChanges = event.changes.filter { change -> change.pressed }
+                        if (activeChanges.size >= 2) {
+                            val first = activeChanges[0]
+                            val second = activeChanges[1]
+                            if (first.previousPressed && second.previousPressed) {
+                                val horizontalSpan = abs(second.position.x - first.position.x)
+                                val verticalSpan = abs(second.position.y - first.position.y)
+                                val previousHorizontalSpan = abs(second.previousPosition.x - first.previousPosition.x)
+                                val previousVerticalSpan = abs(second.previousPosition.y - first.previousPosition.y)
+                                if (horizontalSpan >= verticalSpan) {
+                                    horizontalPinchDistance += horizontalSpan - previousHorizontalSpan
+                                    when {
+                                        horizontalPinchDistance >= pinchStepDistance -> {
+                                            onWindowChange(displayConfig.window.step(-1))
+                                            horizontalPinchDistance = 0f
+                                        }
 
-                            nextAccumulator < 0.89f -> {
-                                val nextWindow = displayConfig.window.step(1)
-                                if (nextWindow != displayConfig.window) {
-                                    onWindowChange(nextWindow)
-                                }
-                                onPinchZoomAccumulatorChange(1f)
-                            }
+                                        horizontalPinchDistance <= -pinchStepDistance -> {
+                                            onWindowChange(displayConfig.window.step(1))
+                                            horizontalPinchDistance = 0f
+                                        }
+                                    }
+                                } else {
+                                    verticalPinchDistance += verticalSpan - previousVerticalSpan
+                                    when {
+                                        verticalPinchDistance >= pinchStepDistance -> {
+                                            onGainChange(displayConfig.gain.step(1))
+                                            verticalPinchDistance = 0f
+                                        }
 
-                            else -> onPinchZoomAccumulatorChange(nextAccumulator)
+                                        verticalPinchDistance <= -pinchStepDistance -> {
+                                            onGainChange(displayConfig.gain.step(-1))
+                                            verticalPinchDistance = 0f
+                                        }
+                                    }
+                                }
+                                activeChanges.forEach { it.consume() }
+                            }
+                        } else if (activeChanges.size == 1) {
+                            val change = activeChanges.single()
+                            if (change.previousPressed && size.height > 0) {
+                                val verticalDelta = change.position.y - change.previousPosition.y
+                                if (verticalDelta != 0f) {
+                                    onGestureOffsetChange(
+                                        (gestureOffset + verticalDelta / size.height).coerceIn(-1.2f, 1.2f),
+                                    )
+                                    change.consume()
+                                }
+                            }
                         }
-                    } else {
-                        onPinchZoomAccumulatorChange(1f)
+                        gestureActive = event.changes.any { change -> change.pressed }
                     }
                 }
             },
@@ -12046,16 +14457,51 @@ private fun PreviewWaveformPanel(
             }
         }
 
+        if (plottedSessions.none { (_, trace) -> trace.columns.isNotEmpty() }) {
+            val session = telemetrySession ?: selectorSessions.firstOrNull { it.id == activeSessionId }
+            val emptyWaveformMessage = when {
+                session?.recorderBackedLiveSignal == true ->
+                    "Recorder is active, but this device has not sent live waveform samples."
+
+                session?.isRecordingLike == true && !session.waveformPreviewActive ->
+                    "Recording is active. Start live signal to view its waveform."
+
+                session?.isRecordingLike == true ->
+                    "Waiting for live waveform samples…"
+
+                session?.hostState == BleHostSessionState.Previewing ->
+                    "Waiting for live waveform samples…"
+
+                else -> "Start live signal to show a waveform."
+            }
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.88f),
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .padding(start = 32.dp, end = 32.dp, bottom = waveformBottomInset),
+            ) {
+                Text(
+                    text = emptyWaveformMessage,
+                    modifier = Modifier.padding(horizontal = 18.dp, vertical = 12.dp),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f),
+                    textAlign = TextAlign.Center,
+                )
+            }
+        }
+
         if (selectorSessions.isNotEmpty()) {
-            PreviewControlTargetSelector(
+            PreviewDeviceLaneLegend(
                 sessions = selectorSessions,
                 activeSessionId = activeSessionId,
                 onActivateSession = onActivateSession,
-                compact = true,
-                sideDocked = true,
                 modifier = Modifier
-                    .align(Alignment.CenterStart)
-                    .padding(start = if (isLandscape) 8.dp else 10.dp),
+                    .align(Alignment.TopStart)
+                    .padding(
+                        start = if (isLandscape) 8.dp else 10.dp,
+                        top = 8.dp,
+                    ),
             )
         }
 
@@ -12070,11 +14516,7 @@ private fun PreviewWaveformPanel(
         }
 
         telemetrySession?.let { session ->
-            val shouldShowRecordingTelemetry =
-                session.isRecordingLike || session.recTimePacketCount > 0 || session.usedSpaceMb != null
-            val shouldShowSyncTelemetry =
-                session.awaitingLiveSync || session.liveSync != null || session.lastSyncMetric != null
-            if (shouldShowRecordingTelemetry || shouldShowSyncTelemetry) {
+            if (session.isRecordingLike) {
                 Column(
                     modifier = Modifier
                         .align(Alignment.TopEnd)
@@ -12082,32 +14524,40 @@ private fun PreviewWaveformPanel(
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                     horizontalAlignment = Alignment.End,
                 ) {
-                    if (shouldShowSyncTelemetry) {
-                        PreviewWaveformSyncOverlay(session = session)
-                    }
-                    if (shouldShowRecordingTelemetry) {
-                        Surface(
-                            shape = RoundedCornerShape(14.dp),
-                            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f),
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f),
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Text(
-                                    "REC",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = Color(0xFFD64545).copy(alpha = 0.92f),
-                                )
-                                Text(
-                                    "${formatSeconds(session.recordingSeconds)} | ${formatUsedSpaceLabel(session.usedSpaceMb)}",
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.92f),
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                            }
+                            val stopping = session.hostState == BleHostSessionState.StoppingRecording
+                            Text(
+                                text = when {
+                                    stopping -> "STOP PENDING"
+                                    session.recorderBackedLiveSignal -> "LIVE REC"
+                                    else -> "REC"
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (stopping) {
+                                    MaterialTheme.colorScheme.tertiary
+                                } else {
+                                    Color(0xFFD64545).copy(alpha = 0.92f)
+                                },
+                            )
+                            Text(
+                                text = if (stopping) {
+                                    "Waiting for device confirmation"
+                                } else {
+                                    "${formatSeconds(session.recordingSeconds)} | ${formatUsedSpaceLabel(session.usedSpaceMb)}"
+                                },
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.92f),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
                         }
                     }
                 }
@@ -12124,17 +14574,99 @@ private fun PreviewWaveformPanel(
             }
         }
 
-        val readoutBottomPadding = if (bottomOverlayContent != null) {
-            waveformBottomInset + 8.dp
-        } else {
-            10.dp
+        if (!isLandscape) {
+            val readoutBottomPadding = if (bottomOverlayContent != null) {
+                waveformBottomInset + 8.dp
+            } else {
+                10.dp
+            }
+            PreviewZoomReadoutBadge(
+                text = zoomReadout,
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(end = 10.dp, bottom = readoutBottomPadding),
+            )
         }
-        PreviewZoomReadoutBadge(
-            text = zoomReadout,
-            modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .padding(end = 10.dp, bottom = readoutBottomPadding),
-        )
+    }
+}
+
+@Composable
+private fun PreviewDeviceLaneLegend(
+    sessions: List<DeviceSessionUiState>,
+    activeSessionId: String?,
+    onActivateSession: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val visibleSessions = sessions.take(3)
+    Column(
+        modifier = modifier,
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        visibleSessions.forEachIndexed { index, session ->
+            val active = session.id == activeSessionId
+            val shape = RoundedCornerShape(14.dp)
+            Surface(
+                shape = shape,
+                color = if (active) {
+                    MaterialTheme.colorScheme.surface.copy(alpha = 0.96f)
+                } else {
+                    MaterialTheme.colorScheme.surface.copy(alpha = 0.84f)
+                },
+                modifier = Modifier
+                    .widthIn(min = 108.dp, max = 138.dp)
+                    .heightIn(min = 48.dp)
+                    .border(
+                        width = 1.dp,
+                        color = if (active) {
+                            Color(session.traceColorArgb).copy(alpha = 0.86f)
+                        } else {
+                            MaterialTheme.colorScheme.outline.copy(alpha = 0.28f)
+                        },
+                        shape = shape,
+                    )
+                    .clickable { onActivateSession(session.id) },
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
+                    horizontalArrangement = Arrangement.spacedBy(7.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(9.dp)
+                            .background(Color(session.traceColorArgb), CircleShape),
+                    )
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = compactDeviceUiLabel(session.name, session.address),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            text = if (active) "Selected" else sessionPreviewLabel(session),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (active) {
+                                Color(session.traceColorArgb)
+                            } else {
+                                MaterialTheme.colorScheme.onSurface.copy(alpha = 0.68f)
+                            },
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+            }
+        }
+        if (sessions.size > visibleSessions.size) {
+            Text(
+                text = "+${sessions.size - visibleSessions.size} more device streams",
+                modifier = Modifier.padding(start = 8.dp),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f),
+            )
+        }
     }
 }
 
@@ -12267,16 +14799,25 @@ private fun PreviewControlTargetSelector(
                                     .size(8.dp)
                                     .background(Color(session.traceColorArgb), CircleShape)
                             )
-                            Text(
-                                text = compactDeviceUiLabel(session.name, session.address),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                color = if (session.id == activeSession.id) {
-                                    Color(session.traceColorArgb)
-                                } else {
-                                    MaterialTheme.colorScheme.onSurface
-                                },
-                            )
+                            Column {
+                                Text(
+                                    text = compactDeviceUiLabel(session.name, session.address),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    color = if (session.id == activeSession.id) {
+                                        Color(session.traceColorArgb)
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurface
+                                    },
+                                )
+                                Text(
+                                    text = sessionSelectorTelemetryLabel(session),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.62f),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
                         }
                     },
                     onClick = {
@@ -12389,40 +14930,222 @@ private fun PreviewControlScopeSelector(
 @Composable
 private fun PreviewCompactControlStrip(
     actionSummary: LiveActionSummary,
-    canResync: Boolean,
-    onResync: () -> Unit,
+    allConnectedActionSummary: LiveActionSummary,
+    allConnectedDeviceCount: Int,
+    commandScopeLabel: String,
+    activeSessionName: String?,
     isLandscape: Boolean,
     onStartPreview: () -> Unit,
     onStopPreview: () -> Unit,
     onStartRecording: () -> Unit,
     onStopRecording: () -> Unit,
-    buttonSize: Dp = 18.dp,
+    onStartAllPreview: () -> Unit,
+    onStopAllPreview: () -> Unit,
+    onOpenOperate: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val transportButtonSize = buttonSize + if (isLandscape) 6.dp else 5.dp
+    val previewIsRunning = actionSummary.previewStopCount > 0
+    val recordingIsRunning = actionSummary.recordingStopCount > 0
+    val allPreviewIsRunning = allConnectedActionSummary.previewStopCount > 0
+    val focusLabel = activeSessionName?.takeIf { it.isNotBlank() } ?: "No focused device"
+    val previewLabel = if (previewIsRunning) {
+        "Stop live signal (${actionSummary.previewStopCount})"
+    } else {
+        "Start live signal"
+    }
+    val recordingLabel = when {
+        actionSummary.recordingStopPendingCount > 0 && actionSummary.recordingActiveCount > 0 ->
+            "Stop / retry (${actionSummary.recordingStopCount})"
+        actionSummary.recordingStopPendingCount > 0 ->
+            "Retry stop (${actionSummary.recordingStopPendingCount})"
+        recordingIsRunning -> "Stop recording (${actionSummary.recordingActiveCount})"
+        else -> "Start recording"
+    }
+    val previewEnabled = if (previewIsRunning) actionSummary.canStopPreview else actionSummary.canStartPreview
+    val recordingEnabled = if (recordingIsRunning) actionSummary.canStopRecording else actionSummary.canStartRecording
+    val allPreviewLabel = if (allPreviewIsRunning) {
+        "Stop all live ($allConnectedDeviceCount)"
+    } else {
+        "Start all live ($allConnectedDeviceCount)"
+    }
+    val allPreviewEnabled = if (allPreviewIsRunning) {
+        allConnectedActionSummary.canStopPreview
+    } else {
+        allConnectedActionSummary.canStartPreview
+    }
+
     Surface(
-        shape = RoundedCornerShape(if (isLandscape) 16.dp else 14.dp),
+        shape = RoundedCornerShape(if (isLandscape) 18.dp else 16.dp),
         color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
-        modifier = modifier.animateContentSize(),
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = if (isLandscape) 12.dp else 8.dp)
+            .animateContentSize(),
+    ) {
+        if (isLandscape) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                LiveSignalDockSummary(
+                    targetLabel = commandScopeLabel,
+                    focusLabel = focusLabel,
+                    modifier = Modifier.weight(1.15f),
+                )
+                PreviewDockActionButton(
+                    label = previewLabel,
+                    enabled = previewEnabled,
+                    onClick = if (previewIsRunning) onStopPreview else onStartPreview,
+                    modifier = Modifier.weight(1f),
+                )
+                PreviewDockActionButton(
+                    label = recordingLabel,
+                    enabled = recordingEnabled,
+                    recording = true,
+                    onClick = if (recordingIsRunning) onStopRecording else onStartRecording,
+                    modifier = Modifier.weight(1.08f),
+                )
+                PreviewDockActionButton(
+                    label = allPreviewLabel,
+                    enabled = allPreviewEnabled,
+                    onClick = if (allPreviewIsRunning) onStopAllPreview else onStartAllPreview,
+                    modifier = Modifier.weight(1f),
+                )
+                OutlinedButton(
+                    onClick = onOpenOperate,
+                    modifier = Modifier
+                        .weight(0.8f)
+                        .heightIn(min = 50.dp),
+                ) {
+                    Text("Operate")
+                }
+            }
+        } else {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(10.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                LiveSignalDockSummary(targetLabel = commandScopeLabel, focusLabel = focusLabel)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    PreviewDockActionButton(
+                        label = previewLabel,
+                        enabled = previewEnabled,
+                        onClick = if (previewIsRunning) onStopPreview else onStartPreview,
+                        modifier = Modifier.weight(1f),
+                    )
+                    PreviewDockActionButton(
+                        label = recordingLabel,
+                        enabled = recordingEnabled,
+                        recording = true,
+                        onClick = if (recordingIsRunning) onStopRecording else onStartRecording,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+                PreviewDockActionButton(
+                    label = allPreviewLabel,
+                    enabled = allPreviewEnabled,
+                    onClick = if (allPreviewIsRunning) onStopAllPreview else onStartAllPreview,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedButton(
+                    onClick = onOpenOperate,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 50.dp),
+                ) {
+                    Text("Operate")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LiveSignalRecordingStatus(modifier: Modifier = Modifier) {
+    Surface(
+        color = MaterialTheme.colorScheme.primaryContainer,
+        shape = RoundedCornerShape(14.dp),
+        modifier = modifier.heightIn(min = 50.dp),
     ) {
         Row(
-            modifier = Modifier
-                .padding(horizontal = 8.dp, vertical = 6.dp),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            PreviewTransportRow(
-                actionSummary = actionSummary,
-                canResync = canResync,
-                onResync = onResync,
-                onStartPreview = onStartPreview,
-                onStopPreview = onStopPreview,
-                onStartRecording = onStartRecording,
-                onStopRecording = onStopRecording,
-                buttonSize = transportButtonSize,
-                spacing = 6.dp,
+            Icon(
+                imageVector = Icons.AutoMirrored.Outlined.ShowChart,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(20.dp),
             )
+            Column {
+                Text("Live signal", style = MaterialTheme.typography.labelLarge)
+                Text(
+                    "From recording",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.74f),
+                    maxLines = 1,
+                )
+            }
         }
+    }
+}
+
+@Composable
+private fun LiveSignalDockSummary(
+    targetLabel: String,
+    focusLabel: String,
+    modifier: Modifier = Modifier,
+) {
+    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text(
+            text = targetLabel,
+            style = MaterialTheme.typography.titleSmall,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Text(
+            text = "Operate: $focusLabel",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.68f),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+
+}
+
+@Composable
+private fun PreviewDockActionButton(
+    label: String,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    recording: Boolean = false,
+) {
+    Button(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = modifier.heightIn(min = 50.dp),
+        colors = if (recording) {
+            ButtonDefaults.buttonColors(
+                containerColor = MaterialTheme.colorScheme.error,
+                contentColor = MaterialTheme.colorScheme.onError,
+            )
+        } else {
+            ButtonDefaults.buttonColors()
+        },
+    ) {
+        Text(
+            text = label,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 
@@ -12456,10 +15179,10 @@ private fun PreviewAdjustmentRail(
                 ),
                 canStepDown = optionCount > 1,
                 canStepUp = optionCount > 1,
-                minWidth = 48.dp,
-                maxWidth = 78.dp,
-                buttonSize = 14.dp,
-                compact = true,
+                minWidth = 82.dp,
+                maxWidth = 132.dp,
+                buttonSize = 36.dp,
+                compact = false,
                 onLabelClick = {
                     if (!session.isConnected) {
                         return@PreviewCompactStepperChip
@@ -12493,15 +15216,16 @@ private fun PreviewAdjustmentRail(
                 selected = displayConfig.removeDc,
                 onClick = { onRemoveDcChange(!displayConfig.removeDc) },
                 leadingIcon = Icons.Outlined.FilterAlt,
-                compact = true,
+                compact = false,
+                modifier = Modifier.heightIn(min = 40.dp),
             )
             PreviewCompactAdjustChip(
                 label = "X",
                 valueLabel = displayConfig.window.label,
                 canStepDown = displayConfig.window != SignalWindowPreset.entries.first(),
                 canStepUp = displayConfig.window != SignalWindowPreset.entries.last(),
-                buttonSize = 14.dp,
-                compact = true,
+                buttonSize = 36.dp,
+                compact = false,
                 onStepDown = { onWindowChange(displayConfig.window.step(-1)) },
                 onStepUp = { onWindowChange(displayConfig.window.step(1)) },
             )
@@ -12510,8 +15234,8 @@ private fun PreviewAdjustmentRail(
                 valueLabel = displayConfig.gain.label,
                 canStepDown = displayConfig.gain != SignalGainPreset.entries.first(),
                 canStepUp = displayConfig.gain != SignalGainPreset.entries.last(),
-                buttonSize = 14.dp,
-                compact = true,
+                buttonSize = 36.dp,
+                compact = false,
                 onStepDown = { onGainChange(displayConfig.gain.step(-1)) },
                 onStepUp = { onGainChange(displayConfig.gain.step(1)) },
             )
@@ -12896,22 +15620,29 @@ private fun PreviewTransportRow(
             contentDescription = "Resync scoped preview device",
             enabled = canResync,
             filled = false,
+            label = "Sync",
             buttonSize = buttonSize,
             onClick = onResync,
         )
         PreviewTransportButton(
             icon = if (previewActive) Icons.Outlined.Stop else Icons.Outlined.PlayArrow,
-            contentDescription = if (previewActive) "Stop preview" else "Start preview",
+            contentDescription = if (previewActive) "Stop live signal" else "Start live signal",
             enabled = previewEnabled,
             filled = previewActive,
+            label = if (previewActive) "Stop live" else "Live",
             buttonSize = buttonSize,
             onClick = if (previewActive) onStopPreview else onStartPreview,
         )
         PreviewTransportButton(
             icon = if (recordingActive) Icons.Outlined.Stop else Icons.Outlined.FiberManualRecord,
-            contentDescription = if (recordingActive) "Stop recording" else "Start recording",
+            contentDescription = when {
+                actionSummary.hasPendingRecordingStop -> "Retry pending recording stop"
+                recordingActive -> "Stop recording"
+                else -> "Start recording"
+            },
             enabled = recordingEnabled,
             filled = recordingActive,
+            label = if (recordingActive) "Stop rec" else "Record",
             tint = Color(0xFFD64545),
             buttonSize = buttonSize,
             onClick = if (recordingActive) onStopRecording else onStartRecording,
@@ -12925,34 +15656,53 @@ private fun PreviewTransportButton(
     contentDescription: String,
     enabled: Boolean,
     filled: Boolean,
+    label: String? = null,
     tint: Color = MaterialTheme.colorScheme.primary,
     buttonSize: Dp = 42.dp,
     onClick: () -> Unit,
 ) {
+    if (label != null) {
+        val modifier = Modifier.heightIn(min = 48.dp)
+        if (filled) {
+            FilledTonalButton(onClick = onClick, enabled = enabled, modifier = modifier) {
+                Icon(imageVector = icon, contentDescription = null, tint = tint, modifier = Modifier.size(20.dp))
+                Spacer(Modifier.width(6.dp))
+                Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+        } else {
+            OutlinedButton(onClick = onClick, enabled = enabled, modifier = modifier) {
+                Icon(imageVector = icon, contentDescription = null, tint = tint, modifier = Modifier.size(20.dp))
+                Spacer(Modifier.width(6.dp))
+                Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+        }
+        return
+    }
+    val touchTargetSize = maxOf(buttonSize, 48.dp)
     if (filled) {
         FilledTonalIconButton(
             onClick = onClick,
             enabled = enabled,
-            modifier = Modifier.size(buttonSize),
+            modifier = Modifier.size(touchTargetSize),
         ) {
             Icon(
                 imageVector = icon,
                 contentDescription = contentDescription,
                 tint = tint,
-                modifier = Modifier.size((buttonSize * 0.52f)),
+                modifier = Modifier.size((touchTargetSize * 0.52f)),
             )
         }
     } else {
         OutlinedIconButton(
             onClick = onClick,
             enabled = enabled,
-            modifier = Modifier.size(buttonSize),
+            modifier = Modifier.size(touchTargetSize),
         ) {
             Icon(
                 imageVector = icon,
                 contentDescription = contentDescription,
                 tint = tint,
-                modifier = Modifier.size((buttonSize * 0.52f)),
+                modifier = Modifier.size((touchTargetSize * 0.52f)),
             )
         }
     }
@@ -13030,7 +15780,7 @@ private fun StackedSignalMonitorCard(
 
             if (sessions.isEmpty()) {
                 Text(
-                    "Start preview to populate the stack.",
+                    "Start live signal to populate the stack.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.68f),
                 )
@@ -13345,6 +16095,7 @@ private fun buildTraceLegendStatus(
     active: Boolean,
 ): String {
     val mode = when {
+        session.isRecordingLike && session.recorderBackedLiveSignal -> "LIVE REC"
         session.isRecordingLike -> "REC"
         isPreviewingSession(session) -> "LIVE"
         else -> session.statusText
@@ -13453,7 +16204,7 @@ private fun CompactActionChip(
         onClick = onClick,
         enabled = enabled,
         label = { Text(label) },
-        modifier = modifier,
+        modifier = modifier.heightIn(min = 48.dp),
         colors = AssistChipDefaults.assistChipColors(
             containerColor = if (emphasized) {
                 MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
@@ -13567,6 +16318,73 @@ private fun preferredAdvertisementBattery(session: DeviceSessionUiState): Double
     return session.advertisedVoltage ?: session.voltage
 }
 
+private fun sessionSelectorTelemetryLabel(session: DeviceSessionUiState): String {
+    val rssi = session.rssi?.let { "$it dBm" } ?: "RSSI --"
+    val battery = preferredAdvertisementBattery(session)?.let(::formatVoltageLabel) ?: "Batt --"
+    return "$rssi  ·  $battery"
+}
+
+private fun advertisementStateLabel(session: DeviceSessionUiState): String {
+    return when {
+        session.isRecordingLike -> "Recording"
+        isPreviewingSession(session) -> "Live signal"
+        session.isConnected -> "Connected"
+        session.isLinkingLike -> "Connecting"
+        session.advertisedHealthStatus?.recording == true -> "Recording (advertised)"
+        session.advertisedHealthStatus?.previewing == true -> "Live signal (advertised)"
+        session.lastSeenAtMs > 0L -> formatRecentSeenLabel(session)
+        else -> "Awaiting advertisement"
+    }
+}
+
+private fun advertisementSourceLabel(session: DeviceSessionUiState): String {
+    return when {
+        session.advertisedHealthStatus != null -> "CE64 v${session.advertisedHealthStatus.formatVersion} health/storage advertisement"
+        session.hasAdvertisementTelemetry -> "Advertisement telemetry received"
+        session.advertisedServiceMatch -> "CE service advertised"
+        session.namePrefixMatch -> "CE name advertised"
+        else -> "BLE advertisement"
+    }
+}
+
+private fun advertisementHealthLabel(status: Ce64AdvertisementStatus): String {
+    val failed = status.failedSubsystems
+    val degraded = status.degradedSubsystems
+    return when {
+        failed != 0 -> "Fault F${failed.toString(16).uppercase().padStart(2, '0')}"
+        else -> "Degraded D${degraded.toString(16).uppercase().padStart(2, '0')}"
+    }
+}
+
+private fun formatConnectedBatteryLabel(session: DeviceSessionUiState): String {
+    return when {
+        session.voltage != null -> "${formatVoltageLabel(session.voltage)} live"
+        session.advertisedVoltage != null -> "${formatVoltageLabel(session.advertisedVoltage)} ad"
+        else -> "Not reported"
+    }
+}
+
+private fun formatDeviceFirmwareLabel(session: DeviceSessionUiState): String {
+    return buildList {
+        session.swVersion?.takeIf { it.isNotBlank() }?.let { add("SW $it") }
+        session.hwVersion?.takeIf { it.isNotBlank() }?.let { add("HW $it") }
+    }.joinToString(" / ").ifBlank { "Not reported" }
+}
+
+private fun bleOtaPhaseLabel(phase: BleOtaPhase): String = when (phase) {
+    BleOtaPhase.Idle -> "Idle"
+    BleOtaPhase.PackageReady -> "Ready"
+    BleOtaPhase.Staging -> "Staging"
+    BleOtaPhase.Verifying -> "Verifying"
+    BleOtaPhase.ReadyToInstall -> "Verified"
+    BleOtaPhase.InstallRequested -> "Restarting"
+    BleOtaPhase.Failed -> "Paused"
+}
+
+private fun formatWaveformOffsetLabel(offset: Float): String {
+    return String.format(Locale.US, "%+.0f%%", offset * 100f)
+}
+
 private fun formatSeconds(seconds: Long): String {
     val hrs = seconds / 3600
     val mins = (seconds % 3600) / 60
@@ -13676,7 +16494,7 @@ private fun formatSyncProgressTelemetryAscii(metric: SyncMetricUiState?, liveSyn
         resolveSyncAccuracyEstimateMs(metric, liveSync)?.let { add("Acc ${formatMs(it)}") }
         resolveSyncMeasurementCount(metric, liveSync)?.let { add("N $it") }
         when {
-            liveSync != null && liveSync.outlier -> add("Off ${formatSignedMs(liveSync.lastOffsetMs.toDouble())}")
+            liveSync != null && liveSync.outlier -> add("Sync sample rejected")
             liveSync != null -> add("Off ${formatSignedMs(liveSync.rollingMeanMs)}")
             metric?.offsetMs != null -> add("Off ${formatSignedMs(metric.offsetMs)}")
         }
@@ -13689,7 +16507,7 @@ private fun formatSyncCompactLineAscii(metric: SyncMetricUiState?, liveSync: Liv
     val measurementCount = resolveSyncMeasurementCount(metric, liveSync) ?: 0
     if (liveSync != null) {
         return if (liveSync.outlier) {
-            "Sync live outlier ${formatSignedMs(liveSync.lastOffsetMs.toDouble())}  |  acc $accuracyText  |  dly ${formatMs(liveSync.delayMs)}  |  n $measurementCount"
+            "Sync sample rejected  |  n $measurementCount"
         } else {
             "Sync live off ${formatSignedMs(liveSync.rollingMeanMs)}  |  acc $accuracyText  |  dly ${formatMs(liveSync.delayMs)}  |  n $measurementCount"
         }
@@ -13706,11 +16524,10 @@ private fun formatSyncTightLineAscii(metric: SyncMetricUiState?, liveSync: LiveS
     val accuracyText = formatMs(resolveSyncAccuracyEstimateMs(metric, liveSync))
     val measurementCount = resolveSyncMeasurementCount(metric, liveSync) ?: 0
     if (liveSync != null) {
-        val offsetText = if (liveSync.outlier) {
-            formatSignedMs(liveSync.lastOffsetMs.toDouble())
-        } else {
-            formatSignedMs(liveSync.rollingMeanMs)
+        if (liveSync.outlier) {
+            return "sync sample rejected  |  n $measurementCount"
         }
+        val offsetText = formatSignedMs(liveSync.rollingMeanMs)
         return buildString {
             append("off ")
             append(offsetText)

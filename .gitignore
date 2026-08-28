@@ -19,6 +19,19 @@
 /.codex-write-test.txt
 /tmp/
 
+# Local Firebase/Node tooling and generated dashboard output.
+/.pnpm-store/
+/_artifacts/
+/firebase/firebase-debug.log
+/firebase/functions/node_modules/
+/firebase/functions/node.cmd
+/web-dashboard/node_modules/
+/web-dashboard/.next/
+/web-dashboard/.vinext/
+/web-dashboard/.wrangler/
+/web-dashboard/firebase-hosting/dist/
+/web-dashboard/
+
 # Local source snapshots, not application source.
 *.testcopy
 *.codex_work*

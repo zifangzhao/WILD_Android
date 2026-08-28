@@ -1,0 +1,7 @@
+# Firebase's package manager now requires each dependency build hook to be
+# reviewed explicitly. These two are required by the production SDKs. The
+# native regex helper belongs only to the local deployment CLI and is kept off.
+allowBuilds:
+  "@firebase/util": true
+  protobufjs: true
+  re2: false

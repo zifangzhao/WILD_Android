@@ -45,6 +45,102 @@ class Ce32AdvertisementTelemetryTest {
     }
 
     @Test
+    fun parsesCurrentCe64V4HealthAndStorageAdvertisement() {
+        val status = assertNotNull(
+            Ce32AdvertisementTelemetry.parseCe64StatusPayload(
+                "CE450700000000F819100E".encodeToByteArray(),
+            ),
+        )
+
+        assertEquals(4, status.formatVersion)
+        assertTrue(status.recording)
+        assertFalse(status.previewing)
+        assertEquals(0x07, status.bootModuleStatusPacked)
+        assertEquals(0, status.lastEventCode)
+        assertEquals(4.96, status.batteryVoltage, 1e-9)
+        assertEquals(25, status.storageUsedPercent)
+        assertEquals(3600L, status.recordingSeconds)
+        assertEquals(
+            4.96,
+            assertNotNull(
+                Ce32AdvertisementTelemetry.parseVoltagePayload(
+                    "450700000000F819100E".encodeToByteArray(),
+                ),
+            ),
+            1e-9,
+        )
+    }
+
+    @Test
+    fun preservesLegacyV2AndV3ElapsedTimeLayouts() {
+        val v2 = assertNotNull(
+            Ce32AdvertisementTelemetry.parseCe64StatusPayload(
+                "CE257E12340000F8643412".encodeToByteArray(),
+            ),
+        )
+        val v3 = assertNotNull(
+            Ce32AdvertisementTelemetry.parseCe64StatusPayload(
+                "CE39AF00000000F8643412".encodeToByteArray(),
+            ),
+        )
+
+        assertEquals(2, v2.formatVersion)
+        assertTrue(v2.recording)
+        assertEquals(0x1234, v2.lastEventCode)
+        assertEquals(0x1234L, v2.recordingSeconds)
+        assertTrue(v2.hasRecordingElapsedTime)
+        assertFalse(v2.hasTemperatureTelemetry)
+
+        assertEquals(3, v3.formatVersion)
+        assertTrue(v3.recording)
+        assertEquals(0x1234L, v3.recordingSeconds)
+        assertTrue(v3.hasRecordingElapsedTime)
+        assertFalse(v3.hasTemperatureTelemetry)
+    }
+
+    @Test
+    fun parsesV6TemperatureAndV7AlternatingExtensionPagesWithoutChangingV4() {
+        val v6Temperature = assertNotNull(
+            Ce32AdvertisementTelemetry.parseCe64StatusPayload(
+                "CE610200000000F819732B".encodeToByteArray(),
+            ),
+        )
+        val v7ElapsedTime = assertNotNull(
+            Ce32AdvertisementTelemetry.parseCe64StatusPayload(
+                "CE7D4500000000F8192301".encodeToByteArray(),
+            ),
+        )
+        val v7Temperature = assertNotNull(
+            Ce32AdvertisementTelemetry.parseCe64StatusPayload(
+                "CE750200000000F819732B".encodeToByteArray(),
+            ),
+        )
+
+        assertEquals(6, v6Temperature.formatVersion)
+        assertTrue(v6Temperature.hasTemperatureTelemetry)
+        assertFalse(v6Temperature.hasRecordingElapsedTime)
+        assertEquals(37.0, assertNotNull(v6Temperature.auxTemperatureCelsius), 1e-9)
+        assertEquals(29.5, assertNotNull(v6Temperature.mcuTemperatureCelsius), 1e-9)
+
+        assertEquals(7, v7ElapsedTime.formatVersion)
+        assertTrue(v7ElapsedTime.hasRecordingElapsedTime)
+        assertFalse(v7ElapsedTime.hasTemperatureTelemetry)
+        assertEquals(0x012345L, v7ElapsedTime.recordingSeconds)
+
+        val merged = assertNotNull(Ce32AdvertisementTelemetry.mergeStatusPages(v7ElapsedTime, v7Temperature))
+        assertTrue(merged.hasRecordingElapsedTime)
+        assertTrue(merged.hasTemperatureTelemetry)
+        assertEquals(0x012345L, merged.recordingSeconds)
+        assertEquals(37.0, assertNotNull(merged.auxTemperatureCelsius), 1e-9)
+        assertEquals(29.5, assertNotNull(merged.mcuTemperatureCelsius), 1e-9)
+    }
+
+    @Test
+    fun rejectsUnknownCe64AdvertisementVersion() {
+        assertNull(Ce32AdvertisementTelemetry.parseCe64StatusPayload("CE150700000000F819100E".encodeToByteArray()))
+    }
+
+    @Test
     fun hasManufacturerPayloadIgnoresScanRecordsWithoutMfgSections() {
         val scanBytes = byteArrayOf(
             0x02,

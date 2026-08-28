@@ -2,10 +2,31 @@ package com.wild.android.ble
 
 import android.bluetooth.le.ScanRecord
 
+data class Ce64AdvertisementStatus(
+    val formatVersion: Int,
+    val recording: Boolean,
+    val previewing: Boolean,
+    val bootModuleStatusPacked: Int,
+    val lastEventCode: Int,
+    val failedSubsystems: Int,
+    val degradedSubsystems: Int,
+    val batteryVoltage: Double,
+    val storageUsedPercent: Int?,
+    val recordingSeconds: Long,
+    /** True only when this advertisement carried an elapsed-time value. */
+    val hasRecordingElapsedTime: Boolean = true,
+    /** True only when this advertisement carried the slow-ADC temperature page. */
+    val hasTemperatureTelemetry: Boolean = false,
+    val auxTemperatureCelsius: Double? = null,
+    val mcuTemperatureCelsius: Double? = null,
+)
+
 object Ce32AdvertisementTelemetry {
     private const val ManufacturerSpecificDataType = 0xFF
     private const val MinBatteryVoltage = 2.0
     private const val MaxBatteryVoltage = 6.5
+    private const val Ce64StatusBytes = 10
+    private const val Ce64StatusHexChars = Ce64StatusBytes * 2
 
     fun hasManufacturerPayload(record: ScanRecord?): Boolean {
         if (record == null) {
@@ -40,6 +61,27 @@ object Ce32AdvertisementTelemetry {
         return parseVoltageFromScanBytes(record.bytes)
     }
 
+    fun parseCe64Status(record: ScanRecord?): Ce64AdvertisementStatus? {
+        if (record == null) {
+            return null
+        }
+
+        val manufacturerData = record.manufacturerSpecificData
+        for (index in 0 until manufacturerData.size()) {
+            val companyId = manufacturerData.keyAt(index)
+            val payload = manufacturerData.valueAt(index) ?: continue
+            parseCe64StatusPayload(payload)?.let { return it }
+
+            val fullPayload = ByteArray(payload.size + 2)
+            fullPayload[0] = (companyId and 0xFF).toByte()
+            fullPayload[1] = ((companyId shr 8) and 0xFF).toByte()
+            payload.copyInto(fullPayload, destinationOffset = 2)
+            parseCe64StatusPayload(fullPayload)?.let { return it }
+        }
+
+        return extractManufacturerSections(record.bytes).firstNotNullOfOrNull(::parseCe64StatusPayload)
+    }
+
     internal fun hasManufacturerPayload(scanRecordBytes: ByteArray?): Boolean {
         return extractManufacturerSections(scanRecordBytes).isNotEmpty()
     }
@@ -60,10 +102,114 @@ object Ce32AdvertisementTelemetry {
             return null
         }
 
-        return parseLegacyDecimalPayload(data)
+        return parseCe64StatusPayload(data)?.batteryVoltage
+            ?: parseLegacyDecimalPayload(data)
             ?: parseRawVoltagePayload(data)
             ?: parseAsciiHexVoltagePayload(data, depth = 0)
     }
+
+    internal fun parseCe64StatusPayload(data: ByteArray?): Ce64AdvertisementStatus? {
+        if (data == null || data.isEmpty()) {
+            return null
+        }
+
+        val text = data.toString(Charsets.US_ASCII)
+        val hexText = when {
+            text.length == Ce64StatusHexChars && text.all(::isAsciiHexChar) -> text
+            text.length == Ce64StatusHexChars + 2 && text.startsWith("CE", ignoreCase = true) &&
+                text.drop(2).all(::isAsciiHexChar) -> text.drop(2)
+            else -> return null
+        }
+        val decoded = ByteArray(Ce64StatusBytes)
+        for (index in decoded.indices) {
+            val high = hexText[index * 2].digitToIntOrNull(16) ?: return null
+            val low = hexText[index * 2 + 1].digitToIntOrNull(16) ?: return null
+            decoded[index] = ((high shl 4) or low).toByte()
+        }
+
+        val flags = decoded[0].toInt() and 0xFF
+        val formatVersion = flags ushr 4
+        if (formatVersion !in setOf(2, 3, 4, 6, 7)) {
+            return null
+        }
+        val v7TimePage = formatVersion == 7 && flags and 0x08 != 0
+        val hasRecordingElapsedTime = formatVersion != 6 &&
+            (formatVersion != 7 || v7TimePage)
+        val recordingSeconds = when {
+            v7TimePage -> (decoded[1].toLong() and 0xFF) or
+                ((decoded[8].toLong() and 0xFF) shl 8) or
+                ((decoded[9].toLong() and 0xFF) shl 16)
+            hasRecordingElapsedTime -> (decoded[8].toLong() and 0xFF) or
+                ((decoded[9].toLong() and 0xFF) shl 8)
+            else -> 0L
+        }
+        val hasTemperatureTelemetry = formatVersion == 6 || (formatVersion == 7 && !v7TimePage)
+        val auxTemperatureCelsius: Double?
+        val mcuTemperatureCelsius: Double?
+        if (hasTemperatureTelemetry) {
+            val auxCode = (decoded[1].toInt() and 0xFF) or ((decoded[8].toInt() and 0x0F) shl 8)
+            val mcuCode = ((decoded[8].toInt() ushr 4) and 0x0F) or ((decoded[9].toInt() and 0xFF) shl 4)
+            auxTemperatureCelsius = decodeTemperatureDeciC(auxCode)
+            mcuTemperatureCelsius = decodeTemperatureDeciC(mcuCode)
+        } else {
+            auxTemperatureCelsius = null
+            mcuTemperatureCelsius = null
+        }
+        val storageValid = flags and 0x04 != 0
+        val storageRaw = decoded[7].toInt() and 0xFF
+        return Ce64AdvertisementStatus(
+            formatVersion = formatVersion,
+            recording = flags and 0x01 != 0,
+            previewing = flags and 0x02 != 0,
+            bootModuleStatusPacked = if (formatVersion == 4) decoded[1].toInt() and 0xFF else 0xFF,
+            lastEventCode = ((decoded[2].toInt() and 0xFF) shl 8) or (decoded[3].toInt() and 0xFF),
+            failedSubsystems = decoded[4].toInt() and 0xFF,
+            degradedSubsystems = decoded[5].toInt() and 0xFF,
+            batteryVoltage = (decoded[6].toInt() and 0xFF) * 0.02,
+            storageUsedPercent = storageRaw.takeIf { storageValid && it <= 100 },
+            recordingSeconds = recordingSeconds,
+            hasRecordingElapsedTime = hasRecordingElapsedTime,
+            hasTemperatureTelemetry = hasTemperatureTelemetry,
+            auxTemperatureCelsius = auxTemperatureCelsius,
+            mcuTemperatureCelsius = mcuTemperatureCelsius,
+        )
+    }
+
+    /**
+     * V7 alternates the temperature and elapsed-time extension pages. Keep the
+     * last value from the other page, without altering complete legacy V2–V6
+     * advertisements.
+     */
+    fun mergeStatusPages(
+        previous: Ce64AdvertisementStatus?,
+        incoming: Ce64AdvertisementStatus?,
+    ): Ce64AdvertisementStatus? {
+        if (incoming == null || previous == null) return incoming ?: previous
+        val recordingJustStarted = !previous.recording && incoming.recording
+        return incoming.copy(
+            recordingSeconds = when {
+                incoming.hasRecordingElapsedTime -> incoming.recordingSeconds
+                recordingJustStarted -> 0L
+                else -> previous.recordingSeconds
+            },
+            hasRecordingElapsedTime = incoming.hasRecordingElapsedTime ||
+                (!recordingJustStarted && previous.hasRecordingElapsedTime),
+            hasTemperatureTelemetry = incoming.hasTemperatureTelemetry || previous.hasTemperatureTelemetry,
+            auxTemperatureCelsius = if (incoming.hasTemperatureTelemetry) {
+                incoming.auxTemperatureCelsius
+            } else {
+                previous.auxTemperatureCelsius
+            },
+            mcuTemperatureCelsius = if (incoming.hasTemperatureTelemetry) {
+                incoming.mcuTemperatureCelsius
+            } else {
+                previous.mcuTemperatureCelsius
+            },
+        )
+    }
+
+    private fun decodeTemperatureDeciC(code: Int): Double? =
+        if (code == 0x0FFF) null else (code - 400) / 10.0
 
     private fun isValidVoltage(voltage: Double): Boolean {
         return !voltage.isNaN() &&
@@ -169,6 +315,8 @@ object Ce32AdvertisementTelemetry {
             else -> null
         }
     }
+
+    private fun isAsciiHexChar(value: Char): Boolean = value.digitToIntOrNull(16) != null
 
     private fun extractManufacturerSections(scanRecordBytes: ByteArray?): List<ByteArray> {
         if (scanRecordBytes == null || scanRecordBytes.isEmpty()) {

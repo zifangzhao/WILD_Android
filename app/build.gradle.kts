@@ -1,6 +1,7 @@
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.android")
+    id("com.google.gms.google-services")
+    id("org.jetbrains.kotlin.plugin.compose")
 }
 
 android {
@@ -9,10 +10,11 @@ android {
 
     defaultConfig {
         applicationId = "com.wild.android"
-        minSdk = 21
+        // Firebase Authentication requires Android 6.0 (API 23) or newer.
+        minSdk = 23
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 5
+        versionName = "0.1.4"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -41,10 +43,6 @@ android {
         isCoreLibraryDesugaringEnabled = true
     }
 
-    kotlinOptions {
-        jvmTarget = "17"
-    }
-
     buildFeatures {
         compose = true
     }
@@ -53,10 +51,6 @@ android {
         // Older Android package parsers can choke on newer compile-SDK manifest metadata
         // even when the APK itself still targets a lower minSdk.
         additionalParameters += "--no-compile-sdk-metadata"
-    }
-
-    composeOptions {
-        kotlinCompilerExtensionVersion = "1.5.14"
     }
 
     testOptions {
@@ -72,6 +66,8 @@ android {
 
 dependencies {
     val composeBom = platform("androidx.compose:compose-bom:2024.06.00")
+    // Keep the cloud gateway SDKs on a single compatible Firebase release set.
+    val firebaseBom = platform("com.google.firebase:firebase-bom:34.17.0")
 
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.3")
@@ -82,6 +78,7 @@ dependencies {
 
     implementation(composeBom)
     androidTestImplementation(composeBom)
+    implementation(firebaseBom)
 
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")
@@ -89,9 +86,21 @@ dependencies {
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")
+
+    // Foundation for the WILD phone-as-gateway service. These dependencies do
+    // not enable remote control by themselves: access remains governed by
+    // Firebase Authentication and locked Firestore / callable-function rules.
+    implementation("com.google.firebase:firebase-auth")
+    // Keep the public API available to every build. The self-updating
+    // implementation is debug-only so a future Play release cannot contain it.
+    implementation("com.google.firebase:firebase-appdistribution-api:16.0.0-beta20")
+    debugImplementation("com.google.firebase:firebase-appdistribution:16.0.0-beta20")
+    implementation("com.google.firebase:firebase-firestore")
+    implementation("com.google.firebase:firebase-functions")
+    implementation("com.google.firebase:firebase-messaging")
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")
 
-    testImplementation(kotlin("test"))
+    testImplementation("org.jetbrains.kotlin:kotlin-test-junit:2.2.10")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.robolectric:robolectric:4.13")
 

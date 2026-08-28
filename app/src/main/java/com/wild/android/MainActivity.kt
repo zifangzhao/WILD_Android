@@ -55,6 +55,7 @@ class MainActivity : ComponentActivity() {
     private val viewModel by viewModels<WildViewModel>()
     private var debugDestinationOverride by mutableStateOf<String?>(null)
     private var debugDestinationToken by mutableStateOf(0)
+    private var fullExitRequested = false
     private val wildApplication: WildApplication
         get() = application as WildApplication
     private val backgroundBleBackCallback = object : OnBackPressedCallback(true) {
@@ -88,6 +89,7 @@ class MainActivity : ComponentActivity() {
                                 onDebugDestinationConsumed = {
                                     debugDestinationOverride = null
                                 },
+                                onExitApp = ::exitApp,
                             )
                         },
                     )
@@ -101,6 +103,7 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         wildApplication.setUiForeground(true)
+        wildApplication.appUpdateChecker.checkForUpdate()
     }
 
     override fun onUserLeaveHint() {
@@ -110,14 +113,14 @@ class MainActivity : ComponentActivity() {
 
     override fun onStop() {
         wildApplication.setUiForeground(false)
-        if (!isChangingConfigurations && wildApplication.shouldKeepBackgroundBleRuntime()) {
+        if (!fullExitRequested && !isChangingConfigurations && wildApplication.shouldKeepBackgroundBleRuntime()) {
             BleForegroundService.start(this)
         }
         super.onStop()
     }
 
     override fun onDestroy() {
-        if (isFinishing && !isChangingConfigurations && wildApplication.shouldPreserveBleWorkAcrossUiExit()) {
+        if (!fullExitRequested && isFinishing && !isChangingConfigurations && wildApplication.shouldPreserveBleWorkAcrossUiExit()) {
             BleForegroundService.start(this)
         }
         super.onDestroy()
@@ -159,6 +162,14 @@ class MainActivity : ComponentActivity() {
 
         BleForegroundService.start(this)
         return true
+    }
+
+    private fun exitApp() {
+        fullExitRequested = true
+        wildApplication.prepareForFullExit()
+        viewModel.shutdownForAppExit()
+        BleForegroundService.stop(this)
+        finishAndRemoveTask()
     }
 
     private companion object {
@@ -285,7 +296,7 @@ private fun GateCard(
                     .padding(24.dp),
                 verticalArrangement = Arrangement.spacedBy(14.dp),
             ) {
-                Text("Pocket Console", style = MaterialTheme.typography.titleMedium)
+                Text("WILD Control Panel", style = MaterialTheme.typography.titleMedium)
                 Text(title, style = MaterialTheme.typography.headlineSmall)
                 Text(
                     message,

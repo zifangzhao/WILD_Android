@@ -1,0 +1,48 @@
+{
+  "project_info": {
+    "project_number": "125212755833",
+    "project_id": "wild-984fd",
+    "storage_bucket": "wild-984fd.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:125212755833:android:5cc906692c2aad771111a8",
+        "android_client_info": {
+          "package_name": "com.ayaLab.WILDapp"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyD9EcXkWAxwWk5RE-w9h5TvI5ZBDEQGCYs"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:125212755833:android:b2f096be06c92fe51111a8",
+        "android_client_info": {
+          "package_name": "com.wild.android"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyD9EcXkWAxwWk5RE-w9h5TvI5ZBDEQGCYs"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
