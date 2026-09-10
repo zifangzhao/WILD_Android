@@ -1,6 +1,11 @@
 # WILD Android
 
-Phone-first Android client for the CE32 / CE64 / WILD BLE devices, based on the desktop reference in `C:\code\Project\Datalogger_allInOne\CE32_console\CE32_console\CE32_console`.
+Phone-first Android client for CE32 / CE64 / CE128 / WILD BLE devices.
+
+Current update: **0.1.5** — direct task navigation, full scheduler-v2 rule editing,
+verified recording-profile saves, and per-station dashboard diagnostics. See
+[compatibility and validation notes](COMPATIBILITY_20260907.md) for supported
+workflows and the remaining hardware-validation boundaries.
 
 ## What is in this repo
 

@@ -525,6 +525,14 @@ data class RemoteFleetDeviceUiState(
     val auxTemperatureCelsius: Double?,
     val mcuTemperatureCelsius: Double?,
     val recordingSeconds: Long,
+    val advertisedSampleRateHz: Int?,
+    val aiModelId: Int?,
+    val aiClassId: Int?,
+    val aiConfidencePercentage: Int?,
+    val aiEventSequence: Int?,
+    val aiResultAgeSeconds: Int?,
+    val aiResultIsNew: Boolean,
+    val aiResultAdvertisedAtMs: Long?,
     val firmwareVersion: String?,
     val hardwareVersion: String?,
     val lastSeenAtMs: Long,
@@ -548,11 +556,23 @@ internal data class CloudFleetDeviceSnapshot(
     val mcuTemperatureCelsius: Double?,
     val hasTemperatureTelemetry: Boolean,
     val recordingSeconds: Long,
+    val advertisedSampleRateHz: Int?,
+    val aiModelId: Int?,
+    val aiClassId: Int?,
+    val aiConfidencePercentage: Int?,
+    val aiEventSequence: Int?,
+    val aiResultAgeSeconds: Int?,
+    val aiResultIsNew: Boolean,
+    val aiResultAdvertisedAtMs: Long?,
     val firmwareVersion: String?,
     val hardwareVersion: String?,
     val lastSeenAtMs: Long,
     val lastPublishedAtMs: Long,
     val heartbeatIntervalMs: Long,
+    val deviceDetails: Map<String, Any> = emptyMap(),
+    val aiHasResult: Boolean? = null,
+    val aiStatusReportedAtMs: Long? = null,
+    val statusAdvertisedAtMs: Long? = null,
 ) {
     fun toFirestoreFields(): Map<String, Any> = buildMap {
         put("gatewayId", gatewayId)
@@ -566,10 +586,24 @@ internal data class CloudFleetDeviceSnapshot(
         put("lastSeenAtMs", lastSeenAtMs)
         put("lastPublishedAtMs", lastPublishedAtMs)
         put("updatedAt", FieldValue.serverTimestamp())
+        if (deviceDetails.isNotEmpty()) put("deviceDetails", deviceDetails)
+        aiHasResult?.let { put("aiHasResult", it) }
+        aiStatusReportedAtMs?.let { put("aiStatusReportedAtMs", it) }
+        statusAdvertisedAtMs?.let { put("statusAdvertisedAtMs", it) }
         rssiDbm?.let { put("rssiDbm", it) }
         batteryVolts?.let { put("batteryVolts", it) }
         storageUsedMb?.let { put("storageUsedMb", it) }
         storageUsedPercent?.let { put("storageUsedPercent", it) }
+        advertisedSampleRateHz?.let { put("advertisedSampleRateHz", it) }
+        aiModelId?.let { put("aiModelId", it) }
+        aiClassId?.let { put("aiClassId", it) }
+        aiConfidencePercentage?.let { put("aiConfidencePercentage", it) }
+        aiEventSequence?.let { put("aiEventSequence", it) }
+        aiResultAgeSeconds?.let { put("aiResultAgeSeconds", it) }
+        if (aiModelId != null) {
+            put("aiResultIsNew", aiResultIsNew)
+            aiResultAdvertisedAtMs?.let { put("aiResultAdvertisedAtMs", it) }
+        }
         if (hasTemperatureTelemetry) {
             put("auxTemperatureCelsius", auxTemperatureCelsius ?: FieldValue.delete())
             put("mcuTemperatureCelsius", mcuTemperatureCelsius ?: FieldValue.delete())
@@ -645,11 +679,25 @@ internal fun cloudDeviceSnapshot(
         mcuTemperatureCelsius = advertisedStatus?.mcuTemperatureCelsius,
         hasTemperatureTelemetry = advertisedStatus?.hasTemperatureTelemetry == true,
         recordingSeconds = maxOf(session.recordingSeconds, advertisedStatus?.recordingSeconds ?: 0L),
+        advertisedSampleRateHz = advertisedStatus?.advertisedSampleRateHz,
+        aiModelId = advertisedStatus?.aiModelId,
+        aiClassId = advertisedStatus?.aiClassId,
+        aiConfidencePercentage = advertisedStatus?.aiConfidencePercentage,
+        aiEventSequence = advertisedStatus?.aiEventSequence,
+        aiResultAgeSeconds = advertisedStatus?.aiResultAgeSeconds,
+        aiResultIsNew = advertisedStatus?.aiResultIsNew == true,
+        aiResultAdvertisedAtMs = session.lastAiResultAtMs.takeIf { it > 0L },
         firmwareVersion = session.swVersion,
         hardwareVersion = session.hwVersion,
         lastSeenAtMs = session.lastSeenAtMs.takeIf { it > 0L } ?: publishedAtMs,
         lastPublishedAtMs = publishedAtMs,
         heartbeatIntervalMs = cloudHeartbeatIntervalMs(session),
+        deviceDetails = cloudDeviceDetails(session),
+        aiHasResult = advertisedStatus?.hasAiResult?.takeIf { session.lastAiAdvertisementAtMs > 0L },
+        aiStatusReportedAtMs = session.lastAiAdvertisementAtMs.takeIf { it > 0L },
+        // Explicit zero distinguishes a new gateway that has never seen a
+        // status packet from legacy gateways that don't report provenance.
+        statusAdvertisedAtMs = session.lastStatusAdvertisementAtMs,
     )
 }
 
@@ -729,6 +777,10 @@ internal fun cloudStatusFingerprint(sessions: Collection<DeviceSessionUiState>):
                 cloudMetricBucket(advertisedStatus?.mcuTemperatureCelsius, 0.1).toString(),
                 (maxOf(session.recordingSeconds, advertisedStatus?.recordingSeconds ?: 0L) /
                     RecordingSecondsBucket).toString(),
+                advertisedStatus?.advertisedSampleRateHz?.toString().orEmpty(),
+                // AI observations can change on every advertisement. They ride
+                // the heartbeat, not a standalone write for every inference.
+                cloudDetailsFingerprint(cloudDeviceDetails(session)),
                 session.swVersion.orEmpty(),
                 session.hwVersion.orEmpty(),
             ).joinToString(separator = ",")
@@ -755,6 +807,8 @@ internal fun cloudSnapshotFingerprint(snapshot: CloudFleetDeviceSnapshot): Strin
         cloudMetricBucket(snapshot.auxTemperatureCelsius, 0.1).toString(),
         cloudMetricBucket(snapshot.mcuTemperatureCelsius, 0.1).toString(),
         (snapshot.recordingSeconds / RecordingSecondsBucket).toString(),
+        snapshot.advertisedSampleRateHz?.toString().orEmpty(),
+        cloudDetailsFingerprint(snapshot.deviceDetails),
         snapshot.firmwareVersion.orEmpty(),
         snapshot.hardwareVersion.orEmpty(),
     ).joinToString(separator = ",")
@@ -785,6 +839,14 @@ private fun remoteDeviceFromDocument(document: DocumentSnapshot): RemoteFleetDev
         auxTemperatureCelsius = (data["auxTemperatureCelsius"] as? Number)?.toDouble(),
         mcuTemperatureCelsius = (data["mcuTemperatureCelsius"] as? Number)?.toDouble(),
         recordingSeconds = (data["recordingSeconds"] as? Number)?.toLong() ?: 0L,
+        advertisedSampleRateHz = (data["advertisedSampleRateHz"] as? Number)?.toInt(),
+        aiModelId = (data["aiModelId"] as? Number)?.toInt(),
+        aiClassId = (data["aiClassId"] as? Number)?.toInt(),
+        aiConfidencePercentage = (data["aiConfidencePercentage"] as? Number)?.toInt(),
+        aiEventSequence = (data["aiEventSequence"] as? Number)?.toInt(),
+        aiResultAgeSeconds = (data["aiResultAgeSeconds"] as? Number)?.toInt(),
+        aiResultIsNew = data["aiResultIsNew"] as? Boolean ?: false,
+        aiResultAdvertisedAtMs = (data["aiResultAdvertisedAtMs"] as? Number)?.toLong(),
         firmwareVersion = data["firmwareVersion"] as? String,
         hardwareVersion = data["hardwareVersion"] as? String,
         lastSeenAtMs = (data["lastSeenAtMs"] as? Number)?.toLong() ?: 0L,

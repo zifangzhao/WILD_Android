@@ -1405,6 +1405,19 @@ class WildViewModel(
         }
     }
 
+    fun refreshScheduler() {
+        val targets = resolveConnectedControlTargetIds(uiState.value)
+        viewModelScope.launch {
+            bleManager.requestSchedulerStatus(targets)
+            bleManager.requestSchedulerConfig(targets)
+        }
+    }
+
+    fun saveSchedulerProfile(profileId: Int) {
+        val deviceId = uiState.value.activeSession?.id ?: return
+        viewModelScope.launch { bleManager.saveSchedulerProfileFromCurrentSettings(deviceId, profileId) }
+    }
+
     fun setSchedulerEnabled(enabled: Boolean) {
         val targetIds = resolveConnectedControlTargetIds(uiState.value)
         if (targetIds.isEmpty()) {
@@ -1412,8 +1425,6 @@ class WildViewModel(
         }
         viewModelScope.launch {
             bleManager.setSchedulerEnabled(targetIds, enabled)
-            bleManager.requestSchedulerStatus(targetIds)
-            bleManager.requestSchedulerConfig(targetIds)
         }
     }
 
@@ -1424,7 +1435,6 @@ class WildViewModel(
         }
         viewModelScope.launch {
             bleManager.setSchedulerRule(targetIds, rule)
-            bleManager.requestSchedulerConfig(targetIds)
         }
     }
 
@@ -1435,7 +1445,6 @@ class WildViewModel(
         }
         viewModelScope.launch {
             bleManager.setSchedulerRuleEnabled(targetIds, ruleId, enabled)
-            bleManager.requestSchedulerConfig(targetIds)
         }
     }
 
@@ -1446,7 +1455,6 @@ class WildViewModel(
         }
         viewModelScope.launch {
             bleManager.clearSchedulerRule(targetIds, ruleId)
-            bleManager.requestSchedulerConfig(targetIds)
         }
     }
 
@@ -1457,8 +1465,6 @@ class WildViewModel(
         }
         viewModelScope.launch {
             bleManager.clearScheduler(targetIds)
-            bleManager.requestSchedulerStatus(targetIds)
-            bleManager.requestSchedulerConfig(targetIds)
         }
     }
 

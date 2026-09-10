@@ -79,7 +79,7 @@ class Ce32FrameParser(
             }
 
             ParseMode.FramedPayload -> {
-                payload += byte
+                if (!appendPayload(byte)) return
                 if (payload.size >= expectedPayloadLength) {
                     mode = ParseMode.FramedTerminator
                 }
@@ -102,7 +102,7 @@ class Ce32FrameParser(
             }
 
             ParseMode.RawPayload -> {
-                payload += byte
+                if (!appendPayload(byte)) return
                 if (payload.size >= expectedPayloadLength) {
                     emitFrame()
                 }
@@ -126,7 +126,14 @@ class Ce32FrameParser(
         zeroPayloadMode: ParseMode,
     ): Boolean {
         commandId = value
-        expectedPayloadLength = payloadLengthResolver(value) ?: Ce32Protocol.payloadLengthFor(value) ?: -1
+        // D8 is self-describing: the first byte echoes D0/D1/.../DB. Never
+        // derive its size from the request currently waiting in the host.
+        // Late replies can arrive after a timeout or during a different read.
+        expectedPayloadLength = if (value == Ce32Protocol.SchedulerResponse) {
+            Int.MAX_VALUE
+        } else {
+            payloadLengthResolver(value) ?: Ce32Protocol.payloadLengthFor(value) ?: -1
+        }
         if (expectedPayloadLength < 0) {
             resetParserState()
             return false
@@ -137,6 +144,15 @@ class Ce32FrameParser(
         } else {
             payloadMode
         }
+        return true
+    }
+
+    private fun appendPayload(byte: Byte): Boolean {
+        if (commandId == Ce32Protocol.SchedulerResponse && payload.isEmpty()) {
+            expectedPayloadLength = Ce32Protocol.schedulerResponsePayloadLengthFor(byte.toInt() and 0xFF)
+                ?: run { resetParserState(); return false }
+        }
+        payload += byte
         return true
     }
 

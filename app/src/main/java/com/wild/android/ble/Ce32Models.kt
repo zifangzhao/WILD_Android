@@ -499,6 +499,13 @@ data class AdvertisementStatusSampleUiState(
     val storageUsedPercent: Int?,
     val recordingSeconds: Long?,
     val lastEventCode: Int?,
+    val advertisedSampleRateHz: Int? = null,
+    val aiModelId: Int? = null,
+    val aiClassId: Int? = null,
+    val aiConfidencePercentage: Int? = null,
+    val aiEventSequence: Int? = null,
+    val aiResultAgeSeconds: Int? = null,
+    val aiResultIsNew: Boolean = false,
 ) {
     val hasStateTelemetry: Boolean
         get() = recording != null || previewing != null ||
@@ -553,6 +560,11 @@ data class DeviceSessionUiState(
     val advertisementHistory: List<AdvertisementStatusSampleUiState> = emptyList(),
     val advertisedVoltage: Double? = null,
     val advertisedHealthStatus: Ce64AdvertisementStatus? = null,
+    val lastStatusAdvertisementAtMs: Long = 0L,
+    val lastHealthAdvertisementAtMs: Long = 0L,
+    val lastAiAdvertisementAtMs: Long = 0L,
+    val lastAiResultAtMs: Long = 0L,
+    val configurationReportedAtMs: Long = 0L,
     val hasAdvertisementTelemetry: Boolean = false,
     val lastSeenAtMs: Long = 0L,
     val previewPacketCount: Int = 0,
@@ -602,6 +614,9 @@ data class DeviceSessionUiState(
     val schedulerConfig: SchedulerConfigUiState? = null,
     val schedulerProfileReceiveMask: Int = 0,
     val schedulerProfileWriteMask: Int = 0,
+    val schedulerBusy: Boolean = false,
+    val schedulerMessage: String = "Read the device schedule to begin.",
+    val schedulerReportedAtMs: Long = 0L,
     val records: List<RecordSummary> = emptyList(),
     val ledOn: Boolean = false,
     val gpio0Mode: GpioMode = GpioMode.Unknown,
@@ -624,6 +639,9 @@ data class DeviceSessionUiState(
     val isLegacyWakeFirmware: Boolean = false,
     val isActive: Boolean = false,
     val recorderBackedLiveSignal: Boolean = false,
+    /** Firmware accepted a configuration write during recording and will activate it after stop. */
+    val configurationPendingApply: Boolean = false,
+    val configurationReadbackRemaining: Set<Int> = emptySet(),
     /** True after the host has explicitly sent the live-waveform start command (0x40). */
     val waveformPreviewActive: Boolean = false,
 ) {

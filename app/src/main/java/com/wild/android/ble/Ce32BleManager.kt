@@ -127,11 +127,20 @@ internal fun shouldPromoteSystemParamSyncFallback(
 /**
  * A 0x82 reply is the CE handshake acknowledgement.  The desktop client treats
  * every reply as complete except mode 0x05, which is explicitly a training
- * progress notification.  In particular, a freshly connected CE64 may report
- * zero samples in its acknowledgement, and that must not turn a healthy link
- * into a timeout.
+ * progress notification, and mode 0x06, which is a recorder transport attach.
+ * In particular, a freshly connected CE64 may report zero samples in its
+ * acknowledgement, and that must not turn a healthy link into a timeout.
  */
-internal fun isTrustedInitialSyncCompletion(sync: SyncStatus): Boolean = sync.mode != 0x05
+internal fun isTrustedInitialSyncCompletion(sync: SyncStatus): Boolean = sync.mode !in setOf(0x05, 0x06)
+
+/** CE64 uses 0x82 mode 0x06 when a phone attaches to an already-active recorder. */
+internal fun isRecordingAttachSyncMode(sync: SyncStatus): Boolean = sync.mode == 0x06
+
+/** FM58+ stores configuration received during recording, then activates it at recorder idle. */
+internal fun shouldDeferConfigurationApply(
+    isRecordingLike: Boolean,
+    isRecordingAttach: Boolean,
+): Boolean = isRecordingLike || isRecordingAttach
 
 /**
  * CE64 firmware may begin the bidirectional 0x8D clock exchange without first
@@ -217,11 +226,18 @@ internal fun appendAdvertisementHistorySample(
         voltage = status?.batteryVoltage ?: voltage,
         recording = status?.recording,
         previewing = status?.previewing,
-        failedSubsystems = status?.failedSubsystems,
-        degradedSubsystems = status?.degradedSubsystems,
+        failedSubsystems = status?.takeUnless { it.isAiAdvertisementPage }?.failedSubsystems,
+        degradedSubsystems = status?.takeUnless { it.isAiAdvertisementPage }?.degradedSubsystems,
         storageUsedPercent = status?.storageUsedPercent,
-        recordingSeconds = status?.recordingSeconds,
-        lastEventCode = status?.lastEventCode,
+        recordingSeconds = status?.takeIf { it.hasRecordingElapsedTime }?.recordingSeconds,
+        lastEventCode = status?.takeUnless { it.isAiAdvertisementPage }?.lastEventCode,
+        advertisedSampleRateHz = status?.advertisedSampleRateHz,
+        aiModelId = status?.aiModelId,
+        aiClassId = status?.aiClassId,
+        aiConfidencePercentage = status?.aiConfidencePercentage,
+        aiEventSequence = status?.aiEventSequence,
+        aiResultAgeSeconds = status?.aiResultAgeSeconds,
+        aiResultIsNew = status?.aiResultIsNew == true,
     )
     if (next.voltage == null && !next.hasStateTelemetry) {
         return retained
@@ -234,7 +250,13 @@ internal fun appendAdvertisementHistorySample(
             sample.failedSubsystems != next.failedSubsystems ||
             sample.degradedSubsystems != next.degradedSubsystems ||
             sample.storageUsedPercent != next.storageUsedPercent ||
-            sample.lastEventCode != next.lastEventCode
+            sample.lastEventCode != next.lastEventCode ||
+            sample.advertisedSampleRateHz != next.advertisedSampleRateHz ||
+            sample.aiModelId != next.aiModelId ||
+            sample.aiClassId != next.aiClassId ||
+            sample.aiConfidencePercentage != next.aiConfidencePercentage ||
+            sample.aiEventSequence != next.aiEventSequence ||
+            sample.aiResultIsNew != next.aiResultIsNew
     } ?: true
     if (!stateChanged && previous != null && timestampMs - previous.timestampMs < AdvertisementSampleIntervalMs) {
         return retained
@@ -573,6 +595,10 @@ class Ce32BleManager(
         clearPreviewFallbackTracking(handle)
         clearPreviewPrimeTracking(handle)
         clearParameterReadQueue(handle)
+        handle.recordingAttach = false
+        handle.lowPowerWakePrimed = false
+        handle.deferredConfigurationRefreshJob?.cancel()
+        handle.deferredConfigurationRefreshJob = null
         // Preserve a fresh fast-bootstrap request until the initial bootstrap job consumes it.
         handle.legacyReadyPromoted = false
         handle.legacyHandshakeAckSeen = false
@@ -1154,6 +1180,23 @@ class Ce32BleManager(
 
     suspend fun requestResync(deviceIds: List<String>, suppressRtcWrite: Boolean = false) {
         for (handle in connectedTargets(deviceIds)) {
+            if (isRecorderControlPlaneProtected(handle)) {
+                startPackedTimeLoop(handle)
+                updateSession(handle.id) {
+                    val nextState = synchronizedHostState(it.hostState)
+                    appendEvent(
+                        it.copy(
+                            hostState = nextState,
+                            statusText = statusTextForState(nextState),
+                            syncText = "Sync: recording time anchor active",
+                            awaitingLiveSync = false,
+                            lastMessage = "Full resync deferred while recording",
+                        ),
+                        "Full resync deferred while recording",
+                    )
+                }
+                continue
+            }
             stopInitialBootstrap(handle)
             handle.suppressRtcWriteDuringResync = suppressRtcWrite
             updateSession(handle.id) {
@@ -1260,8 +1303,10 @@ class Ce32BleManager(
                 )
             }
 
-            delay(120)
-            writeCommand(handle, Ce32Protocol.buildReadSystemParams(), "verify system params")
+            if (!markConfigurationDeferredIfNeeded(handle, "Stream sampling-rate update")) {
+                delay(120)
+                writeCommand(handle, Ce32Protocol.buildReadSystemParams(), "verify system params")
+            }
         }
     }
 
@@ -1358,6 +1403,7 @@ class Ce32BleManager(
                     )
                 }
             }
+            markConfigurationDeferredIfNeeded(handle, "Custom sampling-rate update")
         }
     }
 
@@ -1635,6 +1681,7 @@ class Ce32BleManager(
                         current.copy(parsedDsp2Params = next, lastMessage = "DSP1 live update requested")
                     }
                 }
+                markConfigurationDeferredIfNeeded(handle, "DSP${dspIndex + 1} live update")
             }
         }
     }
@@ -1719,8 +1766,10 @@ class Ce32BleManager(
             if (success) {
                 uploadedCount += 1
                 updateSession(handle.id) { it.copy(lastMessage = "System parameter upload requested") }
-                delay(120)
-                writeCommand(handle, Ce32Protocol.buildReadSystemParams(), "verify system params")
+                if (!markConfigurationDeferredIfNeeded(handle, "System parameter upload")) {
+                    delay(120)
+                    writeCommand(handle, Ce32Protocol.buildReadSystemParams(), "verify system params")
+                }
             }
         }
 
@@ -1758,8 +1807,10 @@ class Ce32BleManager(
             if (success) {
                 uploadedCount += 1
                 updateSession(handle.id) { it.copy(lastMessage = "DSP${dspIndex + 1} parameter upload requested") }
-                delay(120)
-                writeCommand(handle, Ce32Protocol.buildReadDspParams(dspIndex), "verify dsp${dspIndex + 1}")
+                if (!markConfigurationDeferredIfNeeded(handle, "DSP${dspIndex + 1} parameter upload")) {
+                    delay(120)
+                    writeCommand(handle, Ce32Protocol.buildReadDspParams(dspIndex), "verify dsp${dspIndex + 1}")
+                }
             }
         }
 
@@ -1940,53 +1991,36 @@ class Ce32BleManager(
         }
     }
 
-    suspend fun setSchedulerEnabled(deviceIds: List<String>, enabled: Boolean) {
-        for (handle in connectedTargets(deviceIds)) {
-            sendSchedulerCommand(
-                handle,
-                Ce32Protocol.SchedulerCommandGlobalEnable,
-                Ce32Protocol.buildSchedulerGlobalEnable(enabled),
-                if (enabled) "enable recording schedule" else "disable recording schedule",
-            )
-        }
-    }
+    suspend fun setSchedulerEnabled(deviceIds: List<String>, enabled: Boolean) =
+        mutateScheduler(deviceIds, 0xD6, Ce32Protocol.buildSchedulerGlobalEnable(enabled),
+            if (enabled) "enable recording schedule" else "disable recording schedule")
 
     suspend fun setSchedulerRule(deviceIds: List<String>, rule: SchedulerRuleUiState) {
-        for (handle in connectedTargets(deviceIds)) {
-            sendSchedulerCommand(
-                handle,
-                Ce32Protocol.SchedulerCommandSetRule,
-                Ce32Protocol.buildSchedulerRuleUpdate(rule),
-                "save schedule rule ${rule.id + 1}",
-            )
-        }
+        Ce64Scheduler.validationError(rule)?.let { _statusBanner.value = it; return }
+        mutateScheduler(deviceIds, 0xD2, Ce32Protocol.buildSchedulerRuleUpdate(rule), "save rule ${rule.id + 1}")
     }
 
-    suspend fun setSchedulerRuleEnabled(deviceIds: List<String>, ruleId: Int, enabled: Boolean) {
-        for (handle in connectedTargets(deviceIds)) {
-            sendSchedulerCommand(
-                handle,
-                Ce32Protocol.SchedulerCommandEnableRule,
-                Ce32Protocol.buildSchedulerRuleEnable(ruleId, enabled),
-                if (enabled) "enable schedule rule ${ruleId + 1}" else "disable schedule rule ${ruleId + 1}",
-            )
-        }
-    }
+    suspend fun setSchedulerRuleEnabled(deviceIds: List<String>, ruleId: Int, enabled: Boolean) =
+        mutateScheduler(deviceIds, 0xD3, Ce32Protocol.buildSchedulerRuleEnable(ruleId, enabled),
+            if (enabled) "enable rule ${ruleId + 1}" else "disable rule ${ruleId + 1}")
 
-    suspend fun clearSchedulerRule(deviceIds: List<String>, ruleId: Int) {
-        for (handle in connectedTargets(deviceIds)) {
-            sendSchedulerCommand(
-                handle,
-                Ce32Protocol.SchedulerCommandClearRule,
-                Ce32Protocol.buildSchedulerRuleClear(ruleId),
-                "clear schedule rule ${ruleId + 1}",
-            )
-        }
-    }
+    suspend fun clearSchedulerRule(deviceIds: List<String>, ruleId: Int) =
+        mutateScheduler(deviceIds, 0xD4, Ce32Protocol.buildSchedulerRuleClear(ruleId), "delete rule ${ruleId + 1}")
 
-    suspend fun clearScheduler(deviceIds: List<String>) {
+    suspend fun clearScheduler(deviceIds: List<String>) =
+        mutateScheduler(deviceIds, 0xD5, Ce32Protocol.buildSchedulerClearAll(), "delete all schedule rules")
+
+    private suspend fun mutateScheduler(deviceIds: List<String>, request: Int, command: ByteArray, label: String) {
         for (handle in connectedTargets(deviceIds)) {
-            sendSchedulerCommand(handle, Ce32Protocol.SchedulerCommandClearAll, Ce32Protocol.buildSchedulerClearAll(), "clear recording schedule")
+            handle.schedulerMutex.withLock {
+                if (sendSchedulerCommand(handle, request, command, label, ownsSchedulerLock = true)) {
+                    // Read only after a confirmed mutation. Preserve rejection
+                    // and unknown-outcome messages instead of masking them.
+                    if (sendSchedulerCommand(handle, 0xD0, Ce32Protocol.buildSchedulerStatusRequest(), "confirm schedule status", ownsSchedulerLock = true)) {
+                        sendSchedulerCommand(handle, 0xD1, Ce32Protocol.buildSchedulerListRequest(), "confirm saved schedule", ownsSchedulerLock = true)
+                    }
+                }
+            }
         }
     }
 
@@ -2015,28 +2049,93 @@ class Ce32BleManager(
         requestCommand: Int,
         command: ByteArray,
         label: String,
+        ownsSchedulerLock: Boolean = false,
     ): Boolean {
-        val responseLength = Ce32Protocol.schedulerResponsePayloadLengthFor(requestCommand) ?: return false
-        val response = CompletableDeferred<Int>()
-        handle.pendingSchedulerResponseCommand = requestCommand
-        handle.schedulerResponsePayloadLength = responseLength
-        handle.pendingSchedulerResponse = response
-        val success = writeCommand(handle, command, label)
-        if (!success) {
-            handle.pendingSchedulerResponseCommand = null
-            handle.schedulerResponsePayloadLength = null
-            handle.pendingSchedulerResponse = null
-            return false
+        if (!ownsSchedulerLock) return handle.schedulerMutex.withLock {
+            sendSchedulerCommand(handle, requestCommand, command, label, ownsSchedulerLock = true)
         }
-        val responseCommand = withTimeoutOrNull(3_500L) { response.await() }
-        if (responseCommand == null) {
-            handle.pendingSchedulerResponseCommand = null
-            handle.schedulerResponsePayloadLength = null
-            handle.pendingSchedulerResponse = null
-            _statusBanner.value = "No schedule reply from ${handle.latestName.ifBlank { handle.id }}. Check firmware and try again."
-            return false
+        return run {
+            if (Ce32Protocol.schedulerResponsePayloadLengthFor(requestCommand) == null) return@run false
+            val readOnly = requestCommand in listOf(0xD0, 0xD1, 0xD9)
+            if (!readOnly && isRecorderControlPlaneProtected(handle)) {
+                val message = "Stop recording before changing schedules or recording profiles. Reading is still available."
+                updateSession(handle.id) { it.copy(schedulerMessage = message) }
+                _statusBanner.value = message
+                return@run false
+            }
+            updateSession(handle.id) { it.copy(schedulerBusy = true, schedulerMessage = "Working: $label…") }
+            try {
+                val attempts = if (Ce64Scheduler.retryable(requestCommand)) 3 else 1
+                repeat(attempts) { attempt ->
+                    val response = CompletableDeferred<Int>()
+                    handle.pendingSchedulerRequest = command
+                    handle.pendingSchedulerResponse = response
+                    if (!writeCommand(handle, command, label)) {
+                        updateSession(handle.id) { it.copy(schedulerMessage = "Schedule request was not sent. Check the connection and try again.") }
+                        return@run false
+                    }
+                    val result = withTimeoutOrNull(3_500L) { response.await() }
+                    if (result != null) return@run result == 0
+                    // Only reads and identical profile chunks may be retried.
+                    // A lost mutation ACK is an unknown outcome, not a failure
+                    // that is safe to replay automatically.
+                    if (attempt + 1 < attempts) delay(180L)
+                }
+                val message = if (readOnly) {
+                    "No schedule reply. Reconnect and read again; this firmware may not support scheduler v2."
+                } else {
+                    "No acknowledgement. Read the schedule to check whether the change was saved before trying again."
+                }
+                updateSession(handle.id) { it.copy(schedulerMessage = message) }
+                _statusBanner.value = message
+                false
+            } finally {
+                handle.pendingSchedulerRequest = null
+                handle.pendingSchedulerResponse = null
+                updateSession(handle.id) { it.copy(schedulerBusy = handle.schedulerProfileInProgress) }
+            }
         }
-        return responseCommand == requestCommand
+    }
+
+    suspend fun saveSchedulerProfileFromCurrentSettings(deviceId: String, profileId: Int) {
+        val handle = handles[deviceId] ?: return
+        if (profileId !in 0..7) return
+        handle.schedulerMutex.withLock {
+            val image = handle.systemParamPayload?.copyOf()?.takeIf { it.size == 512 }
+            val session = currentState(deviceId)
+            if (image == null || session?.isConnected != true || session.configurationPendingApply || isRecorderControlPlaneProtected(handle)) {
+                _statusBanner.value = "Read acquisition settings and stop recording before saving a profile."
+                return@withLock
+            }
+            handle.schedulerProfileInProgress = true
+            handle.schedulerProfileReadBuffer = ByteArray(512)
+            updateSession(deviceId) { it.copy(schedulerBusy = true, schedulerProfileReceiveMask = 0, schedulerProfileWriteMask = 0) }
+            try {
+                for (chunk in 0..15) {
+                    if (!sendSchedulerCommand(handle, 0xDB,
+                            Ce32Protocol.buildSchedulerProfileWrite(profileId, chunk, image.copyOfRange(chunk * 32, (chunk + 1) * 32)),
+                            "save profile ${profileId + 1}: block ${chunk + 1}/16", ownsSchedulerLock = true)) return@withLock
+                }
+                for (chunk in 0..15) {
+                    if (!sendSchedulerCommand(handle, 0xD9, Ce32Protocol.buildSchedulerProfileRead(profileId, chunk),
+                            "verify profile ${profileId + 1}: block ${chunk + 1}/16", ownsSchedulerLock = true)) return@withLock
+                }
+                if (!image.contentEquals(handle.schedulerProfileReadBuffer)) {
+                    val message = "Profile readback did not match. Do not enable rules using this profile; save and verify it again."
+                    updateSession(deviceId) { it.copy(schedulerMessage = message) }
+                    _statusBanner.value = message
+                    return@withLock
+                }
+                if (sendSchedulerCommand(handle, 0xD1, Ce32Protocol.buildSchedulerListRequest(), "read saved profiles", ownsSchedulerLock = true)) {
+                    val message = "Profile ${profileId + 1} saved and verified: all 512 bytes match."
+                    updateSession(deviceId) { it.copy(schedulerMessage = message) }
+                }
+            } finally {
+                handle.schedulerProfileInProgress = false
+                handle.schedulerProfileReadBuffer = null
+                updateSession(deviceId) { it.copy(schedulerBusy = false) }
+            }
+        }
     }
 
     private fun currentOtaState(handle: SessionHandle): BleOtaUiState =
@@ -3510,12 +3609,18 @@ class Ce32BleManager(
                 ),
                 advertisementHistory = appendAdvertisementHistorySample(
                     history = previous?.advertisementHistory.orEmpty(),
-                    status = mergedAdvertisementStatus,
+                    // History stores only what this packet actually measured.
+                    // Merging pages is for the current display, not provenance.
+                    status = advertisedHealthStatus,
                     voltage = advertisedVoltage,
                     timestampMs = seenAtMs,
                 ),
                 advertisedVoltage = mergedAdvertisementStatus?.batteryVoltage ?: advertisedVoltage ?: previous?.advertisedVoltage,
                 advertisedHealthStatus = mergedAdvertisementStatus,
+                lastStatusAdvertisementAtMs = if (advertisedHealthStatus != null) seenAtMs else previous?.lastStatusAdvertisementAtMs ?: 0L,
+                lastHealthAdvertisementAtMs = if (advertisedHealthStatus != null && !advertisedHealthStatus.isAiAdvertisementPage) seenAtMs else previous?.lastHealthAdvertisementAtMs ?: 0L,
+                lastAiAdvertisementAtMs = if (advertisedHealthStatus?.isAiAdvertisementPage == true) seenAtMs else previous?.lastAiAdvertisementAtMs ?: 0L,
+                lastAiResultAtMs = if (advertisedHealthStatus?.isAiAdvertisementPage == true && advertisedHealthStatus.hasAiResult) seenAtMs else previous?.lastAiResultAtMs ?: 0L,
                 hasAdvertisementTelemetry = hasAdvertisementTelemetry || previous?.hasAdvertisementTelemetry == true,
                 advertisedServiceMatch = serviceMatch || previous?.advertisedServiceMatch == true,
                 namePrefixMatch = nameMatch || previous?.namePrefixMatch == true,
@@ -4736,6 +4841,42 @@ class Ce32BleManager(
         }
     }
 
+    /**
+     * FM65 can park the HJ580 UART between brief low-power windows. Two raw
+     * byte edges wake that bridge reliably before the first framed handshake.
+     * They are deliberately not CE32 commands and must not be wrapped in the
+     * legacy 0x80 wake prefix.
+     */
+    private suspend fun primeLowPowerTransport(handle: SessionHandle): Boolean {
+        if (handle.lowPowerWakePrimed) {
+            return true
+        }
+        repeat(InitialLowPowerWakeProbeCount) { index ->
+            val label = "low-power UART wake ${index + 1}/$InitialLowPowerWakeProbeCount"
+            if (!writeLowPowerWakeProbe(handle, label)) {
+                markWriteFailure(handle.id, "$label failed")
+                return false
+            }
+            if (index + 1 < InitialLowPowerWakeProbeCount) {
+                delay(InitialLowPowerWakeProbeSpacingMs)
+            }
+        }
+        handle.lowPowerWakePrimed = true
+        return true
+    }
+
+    @SuppressLint("MissingPermission")
+    private suspend fun writeLowPowerWakeProbe(handle: SessionHandle, label: String): Boolean {
+        val gatt = handle.gatt ?: return false
+        val tx = handle.txCharacteristic ?: return false
+        return handle.writeMutex.withLock {
+            if (handle.bleOtaInProgress) {
+                return@withLock false
+            }
+            writeChunk(gatt, handle, tx, byteArrayOf(0), label)
+        }
+    }
+
     private fun startInitialBootstrap(handle: SessionHandle) {
         stopInitialBootstrap(handle)
         handle.bootstrapSystemParamsReceived = false
@@ -4745,6 +4886,10 @@ class Ce32BleManager(
             var bootstrapFinishedWithoutSync = false
             try {
                 val bootstrapStartedAtMs = System.currentTimeMillis()
+                if (!primeLowPowerTransport(handle)) {
+                    bootstrapFinishedWithoutSync = true
+                    return@launch
+                }
                 if (handle.useLegacyWakePrefix) {
                     delay(InitialLegacyHandshakeDelayMs)
                 } else {
@@ -5346,12 +5491,15 @@ class Ce32BleManager(
     private fun startPackedTimeLoop(handle: SessionHandle) {
         handle.periodicPackedTimeJob?.cancel()
         handle.periodicPackedTimeJob = ioScope.launch {
-            while (true) {
-                delay(1_000)
-                if (!isConnected(handle.id)) {
-                    break
-                }
-                writeCommand(handle, Ce32Protocol.buildPackedTimeMeasurement(), "packed time sync")
+            while (isConnected(handle.id) && !handle.disconnectRequestedByUser) {
+                writeCommand(
+                    handle,
+                    Ce32Protocol.buildPackedTimeMeasurement(),
+                    "packed time sync",
+                    surfaceMessage = false,
+                    surfaceEvent = false,
+                )
+                delay(PackedTimeMeasurementIntervalMs)
             }
         }
     }
@@ -5372,8 +5520,7 @@ class Ce32BleManager(
         handle.pendingDescriptorWrite?.complete(false)
         handle.pendingSchedulerResponse?.complete(-1)
         handle.pendingSchedulerResponse = null
-        handle.pendingSchedulerResponseCommand = null
-        handle.schedulerResponsePayloadLength = null
+        handle.pendingSchedulerRequest = null
         handle.pendingOtaReply?.completeExceptionally(
             BleOtaTimeoutException("BLE connection closed while waiting for CE64 OTA acknowledgement."),
         )
@@ -6060,6 +6207,72 @@ class Ce32BleManager(
         }
     }
 
+    /**
+     * FM63 records to SD while the normal 0x8B/0x8C/0x8D sync transaction can
+     * request sizeable work. Use only compact 0x8F anchors for that session.
+     */
+    private fun isRecorderControlPlaneProtected(handle: SessionHandle): Boolean {
+        return handle.recordingAttach || currentState(handle.id)?.isRecordingLike == true
+    }
+
+    /** Keep the UI honest when firmware accepts, but cannot yet activate, a write. */
+    private fun markConfigurationDeferredIfNeeded(handle: SessionHandle, label: String): Boolean {
+        val deferred = shouldDeferConfigurationApply(
+            isRecordingLike = currentState(handle.id)?.isRecordingLike == true,
+            isRecordingAttach = handle.recordingAttach,
+        )
+        if (!deferred) {
+            return false
+        }
+        val message = "$label staged; applies after recording stops"
+        updateSession(handle.id) {
+            appendEvent(
+                it.copy(
+                    configurationPendingApply = true,
+                    configurationReadbackRemaining = setOf(0x90, 0x91, 0x92),
+                    lastMessage = message,
+                ),
+                message,
+            )
+        }
+        return true
+    }
+
+    private fun queueDeferredConfigurationReadbackAfterStop(handle: SessionHandle) {
+        if (currentState(handle.id)?.configurationPendingApply != true) {
+            return
+        }
+        handle.deferredConfigurationRefreshJob?.cancel()
+        handle.deferredConfigurationRefreshJob = ioScope.launch {
+            delay(DeferredConfigurationReadbackDelayMs)
+            if (!isConnected(handle.id) || handle.disconnectRequestedByUser ||
+                isRecorderControlPlaneProtected(handle)
+            ) {
+                return@launch
+            }
+            updateSession(handle.id) {
+                appendEvent(
+                    it.copy(lastMessage = "Recorder idle; reading deferred configuration"),
+                    "Recorder idle; reading deferred configuration",
+                )
+            }
+            enqueueParameterReads(
+                handle,
+                listOf(
+                    ParameterReadRequest(0x90, Ce32Protocol.buildReadSystemParams(), "read deferred system params", false, false),
+                    ParameterReadRequest(0x91, Ce32Protocol.buildReadDspParams(0), "read deferred dsp1", false, false),
+                    ParameterReadRequest(0x92, Ce32Protocol.buildReadDspParams(1), "read deferred dsp2", false, false),
+                ),
+            )
+        }
+    }
+
+    private fun completeDeferredConfigurationReadback(handle: SessionHandle, command: Int, valid: Boolean) {
+        updateSession(handle.id) { current ->
+            configurationAfterReadback(current, command, valid, isRecorderControlPlaneProtected(handle))
+        }
+    }
+
     private fun handleFrame(deviceId: String, commandId: Int, payload: ByteArray) {
         val handle = handles[deviceId] ?: return
         val sessionBeforeUpdate = currentState(deviceId)
@@ -6106,6 +6319,48 @@ class Ce32BleManager(
             0x82 -> {
                 handle.initialSyncStarted = true
                 val sync = Ce32Protocol.parseSyncStatus(payload) ?: return
+                if (isRecordingAttachSyncMode(sync)) {
+                    handle.recordingAttach = true
+                    handle.initialSyncCompleted = false
+                    stopInitialBootstrap(handle, clearSyncStarted = false)
+                    clearParameterReadQueue(handle)
+                    clearPreviewPrimeTracking(handle)
+                    val syncLine = buildSyncSummaryText(sync)
+                    val syncMetric = buildSyncMetric(sync, syncLine)
+                    appendSyncLog(
+                        handle,
+                        recordType = "sync_recording_attach_0x82",
+                        mode = sync.mode,
+                        samples = sync.sampleCount,
+                        offsetSec = sync.offsetSeconds?.toDouble(),
+                        accuracySec = sync.accuracySeconds?.toDouble(),
+                        delaySec = sync.delaySeconds?.toDouble(),
+                    )
+                    updateSession(deviceId) {
+                        val nextState = if (it.hostState == BleHostSessionState.StoppingRecording) {
+                            BleHostSessionState.StoppingRecording
+                        } else {
+                            BleHostSessionState.Recording
+                        }
+                        appendEvent(
+                            it.copy(
+                                hostState = nextState,
+                                statusText = statusTextForState(nextState),
+                                syncText = "$syncLine — recording attach",
+                                lastSyncMetric = syncMetric,
+                                liveSync = null,
+                                awaitingLiveSync = false,
+                                lastMessage = "Attached to active recorder; compact time sync active",
+                            ),
+                            "Attached to active recorder; compact time sync active",
+                        )
+                    }
+                    startPackedTimeLoop(handle)
+                    return
+                }
+                if (sync.mode == 0x01) {
+                    handle.recordingAttach = false
+                }
                 val syncComplete = isTrustedInitialSyncCompletion(sync)
                 if (syncComplete) {
                     handle.initialSyncCompleted = true
@@ -6160,23 +6415,24 @@ class Ce32BleManager(
             }
 
             0x8B -> {
+                val recorderProtected = isRecorderControlPlaneProtected(handle)
                 updateSession(deviceId) {
                     appendEvent(
                         it.copy(
-                            lastMessage = if (handle.suppressRtcWriteDuringResync) {
-                                "RTC set request suppressed for manual resync"
-                            } else {
-                                "RTC set requested by device"
+                            lastMessage = when {
+                                recorderProtected -> "RTC set deferred while recording"
+                                handle.suppressRtcWriteDuringResync -> "RTC set request suppressed for manual resync"
+                                else -> "RTC set requested by device"
                             },
                         ),
-                        if (handle.suppressRtcWriteDuringResync) {
-                            "RTC set request suppressed for manual resync"
-                        } else {
-                            "RTC set requested by device"
+                        when {
+                            recorderProtected -> "RTC set deferred while recording"
+                            handle.suppressRtcWriteDuringResync -> "RTC set request suppressed for manual resync"
+                            else -> "RTC set requested by device"
                         },
                     )
                 }
-                if (!handle.suppressRtcWriteDuringResync) {
+                if (!recorderProtected && !handle.suppressRtcWriteDuringResync) {
                     ioScope.launch {
                         writeCommand(handle, Ce32Protocol.buildRtcSetCommand(), "rtc set")
                     }
@@ -6184,6 +6440,16 @@ class Ce32BleManager(
             }
 
             0x8C -> {
+                if (isRecorderControlPlaneProtected(handle)) {
+                    startPackedTimeLoop(handle)
+                    updateSession(deviceId) {
+                        appendEvent(
+                            it.copy(lastMessage = "Full sync probe deferred while recording"),
+                            "Full sync probe deferred while recording",
+                        )
+                    }
+                    return
+                }
                 handle.initialSyncStarted = true
                 val hostRx = ZonedDateTime.now()
                 val deviceT0 = parseSyncStamp(payload, 0)
@@ -6211,6 +6477,16 @@ class Ce32BleManager(
             }
 
             0x8D -> {
+                if (isRecorderControlPlaneProtected(handle)) {
+                    startPackedTimeLoop(handle)
+                    updateSession(deviceId) {
+                        appendEvent(
+                            it.copy(lastMessage = "Full sync probe deferred while recording"),
+                            "Full sync probe deferred while recording",
+                        )
+                    }
+                    return
+                }
                 handle.initialSyncStarted = true
                 val hostRx = ZonedDateTime.now()
                 val hostRxMono = System.nanoTime()
@@ -6400,6 +6676,7 @@ class Ce32BleManager(
                 val recordStopAcknowledged = message.trim().startsWith("Rec Stop", ignoreCase = true)
                 if (recordStopAcknowledged) {
                     cancelRecordStopAckTimeout(handle)
+                    handle.recordingAttach = false
                     handle.lastStopRecordingRequestAtMs = 0L
                     handle.periodicPackedTimeJob?.cancel()
                     handle.periodicPackedTimeJob = null
@@ -6444,6 +6721,7 @@ class Ce32BleManager(
                 }
                 if (recordStopAcknowledged) {
                     queueRecordListRefreshAfterStop(handle)
+                    queueDeferredConfigurationReadbackAfterStop(handle)
                 }
             }
 
@@ -6487,30 +6765,40 @@ class Ce32BleManager(
                         swVersion = it.swVersion ?: parsed?.firmwareVersion?.toString(),
                         hwVersion = it.hwVersion ?: parsed?.hardwareVersion?.toString(),
                         systemParamHex = Ce32Protocol.bytesToHex(payload),
+                        configurationReportedAtMs = System.currentTimeMillis(),
                         awaitingLiveSync = if (shouldPromoteFallbackSync) {
                             false
                         } else {
                             it.awaitingLiveSync
                         },
-                        lastMessage = if (shouldPromoteFallbackSync) {
+                        lastMessage = when {
+                            shouldPromoteFallbackSync -> {
                             "System params updated; sync fallback applied"
-                        } else if (handle.initialSyncCompleted) {
+                            }
+                            handle.initialSyncCompleted -> {
                             "System params updated after sync"
-                        } else {
+                            }
+                            else -> {
                             "System params updated"
+                            }
                         },
                         ),
-                        if (shouldPromoteFallbackSync) {
+                        when {
+                            shouldPromoteFallbackSync -> {
                             "System params updated; sync fallback applied"
-                        } else if (handle.initialSyncCompleted) {
+                            }
+                            handle.initialSyncCompleted -> {
                             "System params updated after sync"
-                        } else {
+                            }
+                            else -> {
                             "System params updated"
+                            }
                         },
                     )
                 }
                 requestDspParamsIfNeeded(handle, "system params bootstrap")
                 completeParameterReadIfExpected(handle, 0x90)
+                completeDeferredConfigurationReadback(handle, 0x90, parsed != null)
                 previewPrimeDelayForInboundCommand(commandId)?.let { delayMs ->
                     tryQueuePreviewPrime(handle, initialDelayMs = delayMs)
                 }
@@ -6531,6 +6819,7 @@ class Ce32BleManager(
                 }
                 requestDspParamsIfNeeded(handle, "DSP1 response")
                 completeParameterReadIfExpected(handle, 0x91)
+                completeDeferredConfigurationReadback(handle, 0x91, parsedDsp != null)
                 previewPrimeDelayForInboundCommand(commandId)?.let { delayMs ->
                     tryQueuePreviewPrime(handle, initialDelayMs = delayMs)
                 }
@@ -6550,6 +6839,7 @@ class Ce32BleManager(
                     )
                 }
                 completeParameterReadIfExpected(handle, 0x92)
+                completeDeferredConfigurationReadback(handle, 0x92, parsedDsp != null)
                 previewPrimeDelayForInboundCommand(commandId)?.let { delayMs ->
                     tryQueuePreviewPrime(handle, initialDelayMs = delayMs)
                 }
@@ -6738,6 +7028,11 @@ class Ce32BleManager(
                 val packet = Ce32Protocol.parseRecTimePacket(payload) ?: return
                 val startingRecording = currentState(deviceId)?.hostState == BleHostSessionState.StartingRecording
                 val firstRecTimePacket = currentState(deviceId)?.recTimePacketCount == 0
+                if (!handle.recordingAttach) {
+                    handle.recordingAttach = true
+                    stopInitialBootstrap(handle, clearSyncStarted = false)
+                    clearParameterReadQueue(handle)
+                }
                 if (startingRecording || firstRecTimePacket) {
                     Log.d(
                         "Ce32BleManager",
@@ -6884,7 +7179,8 @@ class Ce32BleManager(
                 val status = Ce32Protocol.parseSchedulerStatus(payload) ?: return
                 updateSession(deviceId) {
                     appendEvent(
-                        it.copy(schedulerStatus = status, lastMessage = "Schedule action result ${status.lastResult}"),
+                        it.copy(schedulerStatus = status, schedulerReportedAtMs = System.currentTimeMillis(),
+                            schedulerMessage = Ce64Scheduler.resultLabel(status.lastResult), lastMessage = Ce64Scheduler.resultLabel(status.lastResult)),
                         "Schedule action result ${status.lastResult}",
                     )
                 }
@@ -6994,18 +7290,22 @@ class Ce32BleManager(
             return
         }
         val requestCommand = payload[0].toInt() and 0xFF
-        val expectedRequest = handle.pendingSchedulerResponseCommand
-        handle.pendingSchedulerResponseCommand = null
-        handle.schedulerResponsePayloadLength = null
-        handle.pendingSchedulerResponse?.complete(requestCommand)
-        handle.pendingSchedulerResponse = null
-        if (expectedRequest != null && expectedRequest != requestCommand) {
-            Log.w(
-                "Ce32BleManager",
-                "Unexpected schedule reply device=${handle.id} expected=${formatCommandId(expectedRequest)} received=${formatCommandId(requestCommand)}",
-            )
-        }
+        val request = handle.pendingSchedulerRequest ?: return
+        if (!Ce64Scheduler.responseMatches(request, payload)) return
         val response = payload.copyOfRange(1, payload.size)
+        val result = when (requestCommand) {
+            0xD0 -> if (Ce32Protocol.parseSchedulerStatus(response) != null) 0 else 4
+            0xD1 -> if (Ce32Protocol.parseSchedulerConfig(response) != null) 0 else 4
+            0xD9 -> 0
+            else -> response[0].toInt() and 0xFF
+        }
+        if (result != 0) {
+            val message = Ce64Scheduler.errorLabel(result)
+            updateSession(handle.id) { it.copy(schedulerMessage = message, lastMessage = message) }
+            _statusBanner.value = message
+            handle.pendingSchedulerResponse?.complete(result)
+            return
+        }
         when (requestCommand) {
             Ce32Protocol.SchedulerCommandStatus -> {
                 val status = Ce32Protocol.parseSchedulerStatus(response) ?: return
@@ -7015,7 +7315,7 @@ class Ce32BleManager(
                     "Recording schedule disabled"
                 }
                 updateSession(handle.id) {
-                    appendEvent(it.copy(schedulerStatus = status, lastMessage = message), message)
+                    appendEvent(it.copy(schedulerStatus = status, schedulerReportedAtMs = System.currentTimeMillis(), schedulerMessage = message, lastMessage = message), message)
                 }
             }
 
@@ -7023,7 +7323,7 @@ class Ce32BleManager(
                 val config = Ce32Protocol.parseSchedulerConfig(response) ?: return
                 val message = "Loaded ${config.rules.count { it.enabled }} active schedule rule(s)"
                 updateSession(handle.id) {
-                    appendEvent(it.copy(schedulerConfig = config, lastMessage = message), message)
+                    appendEvent(it.copy(schedulerConfig = config, schedulerMessage = message, lastMessage = message), message)
                 }
             }
 
@@ -7033,10 +7333,12 @@ class Ce32BleManager(
                 }
                 val profileId = response[0].toInt() and 0xFF
                 val chunkIndex = response[1].toInt() and 0xFF
+                handle.schedulerProfileReadBuffer?.let { response.copyInto(it, chunkIndex * 32, 3, 35) }
                 val message = "Schedule profile ${profileId + 1} chunk ${chunkIndex + 1} received"
                 updateSession(handle.id) {
                     it.copy(
-                        schedulerProfileReceiveMask = it.schedulerProfileReceiveMask or (1 shl chunkIndex.coerceIn(0, 15)),
+                        schedulerProfileReceiveMask = it.schedulerProfileReceiveMask or (1 shl chunkIndex),
+                        schedulerMessage = message,
                         lastMessage = message,
                     )
                 }
@@ -7050,7 +7352,7 @@ class Ce32BleManager(
                 val mask = (response[1].toInt() and 0xFF) or ((response[2].toInt() and 0xFF) shl 8)
                 val message = if (status == 0) "Schedule profile chunk accepted" else "Schedule profile rejected (error $status)"
                 updateSession(handle.id) {
-                    it.copy(schedulerProfileWriteMask = mask, lastMessage = message)
+                    it.copy(schedulerProfileWriteMask = mask, schedulerMessage = message, lastMessage = message)
                 }
             }
 
@@ -7062,10 +7364,11 @@ class Ce32BleManager(
                     "Schedule command rejected (error $status)"
                 }
                 updateSession(handle.id) {
-                    appendEvent(it.copy(lastMessage = message), message)
+                    appendEvent(it.copy(schedulerMessage = message, lastMessage = message), message)
                 }
             }
         }
+        handle.pendingSchedulerResponse?.complete(0)
     }
 
     private fun SpectrumSnapshotUiState.sourceLabel(): String =
@@ -7116,9 +7419,11 @@ class Ce32BleManager(
         var legacyConfigBusyCount: Int = 0
         var pendingSpikeConfigConfirmationTag: Int? = null
         var nextSpikeConfigConfirmationTag: Int = 0
-        var pendingSchedulerResponseCommand: Int? = null
-        var schedulerResponsePayloadLength: Int? = null
+        var pendingSchedulerRequest: ByteArray? = null
         var pendingSchedulerResponse: CompletableDeferred<Int>? = null
+        val schedulerMutex = Mutex()
+        var schedulerProfileInProgress: Boolean = false
+        var schedulerProfileReadBuffer: ByteArray? = null
         var bleOtaPackage: Ce64BleOtaPackage? = null
         var bleOtaInProgress: Boolean = false
         var pendingOtaReplyCommand: Int? = null
@@ -7136,9 +7441,6 @@ class Ce32BleManager(
             onOutOfFrameBytes = { rawBytes ->
                 handleOutOfFrameNotification(this, rawBytes)
             },
-            payloadLengthResolver = { commandId ->
-                if (commandId == Ce32Protocol.SchedulerResponse) schedulerResponsePayloadLength else null
-            },
         )
         var pendingWrite: CompletableDeferred<Boolean>? = null
         var pendingRead: CompletableDeferred<ByteArray?>? = null
@@ -7151,6 +7453,7 @@ class Ce32BleManager(
         var recordStartAckTimeoutJob: Job? = null
         var recordStopAckTimeoutJob: Job? = null
         var recordRefreshJob: Job? = null
+        var deferredConfigurationRefreshJob: Job? = null
         var previewStartupMonitorJob: Job? = null
         var reconnectJob: Job? = null
         var reconnectPending: Boolean = false
@@ -7172,6 +7475,8 @@ class Ce32BleManager(
         var initialBootstrapJob: Job? = null
         var initialSyncStarted: Boolean = false
         var initialSyncCompleted: Boolean = false
+        var recordingAttach: Boolean = false
+        var lowPowerWakePrimed: Boolean = false
         var bootstrapSystemParamsReceived: Boolean = false
         var bootstrapDsp1ReadRequested: Boolean = false
         var bootstrapDsp2ReadRequested: Boolean = false
@@ -7267,8 +7572,12 @@ class Ce32BleManager(
         const val PreviewPrimeThrottleMs = 250L
         const val InitialBootstrapPollMs = 100L
         const val InitialHandshakeSettleMs = 0L
+        const val InitialLowPowerWakeProbeCount = 2
+        const val InitialLowPowerWakeProbeSpacingMs = 35L
         const val InitialHandshakeRetryMs = 500L
         const val InitialHandshakeMaxAttempts = 11
+        const val PackedTimeMeasurementIntervalMs = 5_000L
+        const val DeferredConfigurationReadbackDelayMs = 500L
         const val InitialBootstrapTimeoutMs = 18_500L
         const val InitialLegacyHandshakeDelayMs = 1_200L
         const val LegacyConfigModeBusyBackoffMs = 1_500L

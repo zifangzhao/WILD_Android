@@ -49,6 +49,39 @@ class Ce32AdvertisementHistoryTest {
         assertTrue(!history.single().hasStateTelemetry)
     }
 
+    @Test
+    fun changingAiResultCreatesAnImmediateHistoryPointButAgeAloneDoesNot() {
+        val firstStatus = status(recording = true, previewing = false).copy(
+            formatVersion = 8,
+            batteryVoltage = null,
+            advertisedSampleRateHz = 30_000,
+            isAiAdvertisementPage = true,
+            hasAiResult = true,
+            aiModelId = 1,
+            aiClassId = 3,
+            aiConfidencePercentage = 91,
+            aiEventSequence = 7,
+            aiResultAgeSeconds = 1,
+        )
+        val first = appendAdvertisementHistorySample(emptyList(), firstStatus, null, 1_000L)
+        val increasedAge = appendAdvertisementHistorySample(
+            first,
+            firstStatus.copy(aiResultAgeSeconds = 2),
+            null,
+            1_100L,
+        )
+        val newResult = appendAdvertisementHistorySample(
+            increasedAge,
+            firstStatus.copy(aiEventSequence = 8, aiResultAgeSeconds = 0, aiResultIsNew = true),
+            null,
+            1_200L,
+        )
+
+        assertEquals(1, increasedAge.size)
+        assertEquals(2, newResult.size)
+        assertEquals(8, newResult.last().aiEventSequence)
+    }
+
     private fun status(recording: Boolean, previewing: Boolean): Ce64AdvertisementStatus {
         return Ce64AdvertisementStatus(
             formatVersion = 4,

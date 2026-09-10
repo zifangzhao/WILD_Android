@@ -10,7 +10,8 @@ data class Ce64AdvertisementStatus(
     val lastEventCode: Int,
     val failedSubsystems: Int,
     val degradedSubsystems: Int,
-    val batteryVoltage: Double,
+    /** Null for sparse pages, such as V8 AI telemetry, which do not carry a battery value. */
+    val batteryVoltage: Double?,
     val storageUsedPercent: Int?,
     val recordingSeconds: Long,
     /** True only when this advertisement carried an elapsed-time value. */
@@ -19,6 +20,16 @@ data class Ce64AdvertisementStatus(
     val hasTemperatureTelemetry: Boolean = false,
     val auxTemperatureCelsius: Double? = null,
     val mcuTemperatureCelsius: Double? = null,
+    /** True when this is the V8 AI/ML advertisement rather than a health page. */
+    val isAiAdvertisementPage: Boolean = false,
+    val advertisedSampleRateHz: Int? = null,
+    val hasAiResult: Boolean = false,
+    val aiResultIsNew: Boolean = false,
+    val aiModelId: Int? = null,
+    val aiClassId: Int? = null,
+    val aiConfidencePercentage: Int? = null,
+    val aiEventSequence: Int? = null,
+    val aiResultAgeSeconds: Int? = null,
 )
 
 object Ce32AdvertisementTelemetry {
@@ -129,11 +140,12 @@ object Ce32AdvertisementTelemetry {
 
         val flags = decoded[0].toInt() and 0xFF
         val formatVersion = flags ushr 4
-        if (formatVersion !in setOf(2, 3, 4, 6, 7)) {
+        if (formatVersion !in setOf(2, 3, 4, 6, 7, 8)) {
             return null
         }
+        val aiAdvertisementPage = formatVersion == 8
         val v7TimePage = formatVersion == 7 && flags and 0x08 != 0
-        val hasRecordingElapsedTime = formatVersion != 6 &&
+        val hasRecordingElapsedTime = !aiAdvertisementPage && formatVersion != 6 &&
             (formatVersion != 7 || v7TimePage)
         val recordingSeconds = when {
             v7TimePage -> (decoded[1].toLong() and 0xFF) or
@@ -143,7 +155,8 @@ object Ce32AdvertisementTelemetry {
                 ((decoded[9].toLong() and 0xFF) shl 8)
             else -> 0L
         }
-        val hasTemperatureTelemetry = formatVersion == 6 || (formatVersion == 7 && !v7TimePage)
+        val hasTemperatureTelemetry = !aiAdvertisementPage &&
+            (formatVersion == 6 || (formatVersion == 7 && !v7TimePage))
         val auxTemperatureCelsius: Double?
         val mcuTemperatureCelsius: Double?
         if (hasTemperatureTelemetry) {
@@ -155,30 +168,51 @@ object Ce32AdvertisementTelemetry {
             auxTemperatureCelsius = null
             mcuTemperatureCelsius = null
         }
-        val storageValid = flags and 0x04 != 0
+        val storageValid = !aiAdvertisementPage && flags and 0x04 != 0
         val storageRaw = decoded[7].toInt() and 0xFF
+        val hasAiResult = aiAdvertisementPage && flags and 0x04 != 0 &&
+            (decoded[3].toInt() and 0xFF) <= 100
         return Ce64AdvertisementStatus(
             formatVersion = formatVersion,
             recording = flags and 0x01 != 0,
             previewing = flags and 0x02 != 0,
             bootModuleStatusPacked = if (formatVersion == 4) decoded[1].toInt() and 0xFF else 0xFF,
-            lastEventCode = ((decoded[2].toInt() and 0xFF) shl 8) or (decoded[3].toInt() and 0xFF),
-            failedSubsystems = decoded[4].toInt() and 0xFF,
-            degradedSubsystems = decoded[5].toInt() and 0xFF,
-            batteryVoltage = (decoded[6].toInt() and 0xFF) * 0.02,
+            lastEventCode = if (aiAdvertisementPage) 0 else {
+                ((decoded[2].toInt() and 0xFF) shl 8) or (decoded[3].toInt() and 0xFF)
+            },
+            failedSubsystems = if (aiAdvertisementPage) 0 else decoded[4].toInt() and 0xFF,
+            degradedSubsystems = if (aiAdvertisementPage) 0 else decoded[5].toInt() and 0xFF,
+            batteryVoltage = if (aiAdvertisementPage) null else (decoded[6].toInt() and 0xFF) * 0.02,
             storageUsedPercent = storageRaw.takeIf { storageValid && it <= 100 },
             recordingSeconds = recordingSeconds,
             hasRecordingElapsedTime = hasRecordingElapsedTime,
             hasTemperatureTelemetry = hasTemperatureTelemetry,
             auxTemperatureCelsius = auxTemperatureCelsius,
             mcuTemperatureCelsius = mcuTemperatureCelsius,
+            isAiAdvertisementPage = aiAdvertisementPage,
+            advertisedSampleRateHz = if (aiAdvertisementPage) {
+                (decoded[6].toInt() and 0xFF) or ((decoded[7].toInt() and 0xFF) shl 8)
+            } else {
+                null
+            },
+            hasAiResult = hasAiResult,
+            aiResultIsNew = aiAdvertisementPage && flags and 0x08 != 0,
+            aiModelId = if (hasAiResult) decoded[1].toInt() and 0xFF else null,
+            aiClassId = if (hasAiResult) decoded[2].toInt() and 0xFF else null,
+            aiConfidencePercentage = if (hasAiResult) decoded[3].toInt() and 0xFF else null,
+            aiEventSequence = if (hasAiResult) decoded[4].toInt() and 0xFF else null,
+            aiResultAgeSeconds = if (hasAiResult) {
+                (decoded[8].toInt() and 0xFF) or ((decoded[9].toInt() and 0xFF) shl 8)
+            } else {
+                null
+            },
         )
     }
 
     /**
-     * V7 alternates the temperature and elapsed-time extension pages. Keep the
-     * last value from the other page, without altering complete legacy V2–V6
-     * advertisements.
+     * V7 alternates temperature and elapsed-time pages, while V8 alternates
+     * AI/ML data with the regular health page. Retain values that the sparse
+     * page does not carry so a new AI page never erases battery or storage.
      */
     fun mergeStatusPages(
         previous: Ce64AdvertisementStatus?,
@@ -186,7 +220,15 @@ object Ce32AdvertisementTelemetry {
     ): Ce64AdvertisementStatus? {
         if (incoming == null || previous == null) return incoming ?: previous
         val recordingJustStarted = !previous.recording && incoming.recording
+        val retainHealthFromPrevious = incoming.isAiAdvertisementPage
+        val retainAiFromPrevious = !incoming.isAiAdvertisementPage
         return incoming.copy(
+            bootModuleStatusPacked = if (retainHealthFromPrevious) previous.bootModuleStatusPacked else incoming.bootModuleStatusPacked,
+            lastEventCode = if (retainHealthFromPrevious) previous.lastEventCode else incoming.lastEventCode,
+            failedSubsystems = if (retainHealthFromPrevious) previous.failedSubsystems else incoming.failedSubsystems,
+            degradedSubsystems = if (retainHealthFromPrevious) previous.degradedSubsystems else incoming.degradedSubsystems,
+            batteryVoltage = incoming.batteryVoltage ?: previous.batteryVoltage,
+            storageUsedPercent = incoming.storageUsedPercent ?: previous.storageUsedPercent,
             recordingSeconds = when {
                 incoming.hasRecordingElapsedTime -> incoming.recordingSeconds
                 recordingJustStarted -> 0L
@@ -205,6 +247,14 @@ object Ce32AdvertisementTelemetry {
             } else {
                 previous.mcuTemperatureCelsius
             },
+            advertisedSampleRateHz = incoming.advertisedSampleRateHz ?: previous.advertisedSampleRateHz,
+            hasAiResult = if (retainAiFromPrevious) previous.hasAiResult else incoming.hasAiResult,
+            aiResultIsNew = if (retainAiFromPrevious) false else incoming.aiResultIsNew,
+            aiModelId = if (retainAiFromPrevious) previous.aiModelId else incoming.aiModelId,
+            aiClassId = if (retainAiFromPrevious) previous.aiClassId else incoming.aiClassId,
+            aiConfidencePercentage = if (retainAiFromPrevious) previous.aiConfidencePercentage else incoming.aiConfidencePercentage,
+            aiEventSequence = if (retainAiFromPrevious) previous.aiEventSequence else incoming.aiEventSequence,
+            aiResultAgeSeconds = if (retainAiFromPrevious) previous.aiResultAgeSeconds else incoming.aiResultAgeSeconds,
         )
     }
 

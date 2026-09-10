@@ -196,8 +196,8 @@ private enum class ControlSection(
 private enum class AcquisitionPane(
     val label: String,
 ) {
-    Quick("Quick"),
-    Rates("Rates"),
+    Quick("Device status"),
+    Rates("Sampling rates & channels"),
     Camera("Camera"),
     Impedance("Impedance"),
 }
@@ -205,26 +205,26 @@ private enum class AcquisitionPane(
 private enum class ClosedLoopPane(
     val label: String,
 ) {
-    Quick("Quick"),
-    Profile("Profile"),
-    Advanced("Advanced"),
-    Monitor("Monitor"),
+    Quick("Stimulation controls"),
+    Profile("Module settings"),
+    Advanced("AI & advanced settings"),
+    Monitor("Event waveforms"),
 }
 
 private enum class AnalysisPane(
     val label: String,
 ) {
-    Spike("Spike"),
-    Spectrum("Spectrum"),
-    Schedule("Schedule"),
+    Spike("Spike detection"),
+    Spectrum("Frequency spectrum"),
+    Schedule("Recording schedule & profiles"),
 }
 
 private enum class SystemPane(
     val label: String,
 ) {
-    Push("Push"),
-    Lifecycle("Lifecycle"),
-    Dump("Dump"),
+    Push("Save device settings"),
+    Lifecycle("Firmware update & power"),
+    Dump("Raw parameter data"),
 }
 
 private enum class RecordsPane(
@@ -810,6 +810,8 @@ fun WildApp(
                             onSetSchedulerRuleEnabled = viewModel::setSchedulerRuleEnabled,
                             onClearSchedulerRule = viewModel::clearSchedulerRule,
                             onClearScheduler = viewModel::clearScheduler,
+                            onReadScheduler = viewModel::refreshScheduler,
+                            onSaveSchedulerProfile = viewModel::saveSchedulerProfile,
                         )
 
                         AppDestination.Records -> RecordsScreen(
@@ -1389,6 +1391,21 @@ private fun RemoteFleetDeviceCard(device: RemoteFleetDeviceUiState) {
                 if (device.recording && device.recordingSeconds > 0L) {
                     DeviceDashboardMetricChip("Rec ${formatSeconds(device.recordingSeconds)}", MaterialTheme.colorScheme.error)
                 }
+                device.advertisedSampleRateHz?.takeIf { rate -> rate > 0 }?.let { rate ->
+                    DeviceDashboardMetricChip("Rate $rate Hz")
+                }
+                device.aiModelId?.let { modelId ->
+                    val aiLabel = buildString {
+                        append("AI M$modelId")
+                        device.aiClassId?.let { classId -> append(" C$classId") }
+                        device.aiConfidencePercentage?.let { confidence -> append(" $confidence%") }
+                        if (device.aiResultIsNew) append(" new")
+                    }
+                    DeviceDashboardMetricChip(
+                        aiLabel,
+                        if (device.aiResultIsNew) MaterialTheme.colorScheme.primary else statusColor,
+                    )
+                }
             }
             Text(
                 "Gateway update ${formatCloudAge(device.lastPublishedAtMs)}",
@@ -1637,6 +1654,15 @@ private fun AdvertisementStatusTile(
                 }
                 if (advertisedStatus?.recording == true && advertisedStatus.recordingSeconds > 0L) {
                     DeviceDashboardMetricChip(text = "Rec ${formatSeconds(advertisedStatus.recordingSeconds)} ad")
+                }
+                advertisedStatus?.advertisedSampleRateHz?.takeIf { rate -> rate > 0 }?.let { rate ->
+                    DeviceDashboardMetricChip(text = "Rate $rate Hz ad")
+                }
+                advertisedStatus?.takeIf { status -> status.hasAiResult }?.let { status ->
+                    DeviceDashboardMetricChip(
+                        text = advertisementAiLabel(status),
+                        color = if (status.aiResultIsNew) MaterialTheme.colorScheme.primary else stateColor,
+                    )
                 }
                 advertisedStatus?.takeIf { it.failedSubsystems != 0 || it.degradedSubsystems != 0 }?.let { status ->
                     DeviceDashboardMetricChip(
@@ -2455,6 +2481,21 @@ private fun AdvertisementStatusSummary(session: DeviceSessionUiState) {
                 }
                 latest?.recordingSeconds?.takeIf { seconds -> seconds > 0L }?.let { seconds ->
                     DeviceDashboardMetricChip("Rec ${formatSeconds(seconds)}")
+                }
+                latest?.advertisedSampleRateHz?.takeIf { rate -> rate > 0 }?.let { rate ->
+                    DeviceDashboardMetricChip("Rate $rate Hz")
+                }
+                latest?.aiModelId?.let { modelId ->
+                    val aiLabel = buildString {
+                        append("AI M$modelId")
+                        latest.aiClassId?.let { classId -> append(" C$classId") }
+                        latest.aiConfidencePercentage?.let { confidence -> append(" $confidence%") }
+                        if (latest.aiResultIsNew) append(" new")
+                    }
+                    DeviceDashboardMetricChip(
+                        aiLabel,
+                        if (latest.aiResultIsNew) MaterialTheme.colorScheme.primary else stateColor,
+                    )
                 }
                 latest?.lastEventCode?.takeIf { eventCode -> eventCode != 0 }?.let { eventCode ->
                     DeviceDashboardMetricChip("Event 0x${eventCode.toString(16).uppercase(Locale.US)}")
@@ -5014,6 +5055,8 @@ private fun DeviceParameterScreen(
     onSetSchedulerRuleEnabled: (Int, Boolean) -> Unit,
     onClearSchedulerRule: (Int) -> Unit,
     onClearScheduler: () -> Unit,
+    onReadScheduler: () -> Unit,
+    onSaveSchedulerProfile: (Int) -> Unit,
 ) {
     val activeSession = uiState.activeSession
     val quickScopeTargets = scopedSessions(uiState)
@@ -5166,6 +5209,8 @@ private fun DeviceParameterScreen(
             onSetSchedulerRuleEnabled = onSetSchedulerRuleEnabled,
             onClearSchedulerRule = onClearSchedulerRule,
             onClearScheduler = onClearScheduler,
+                            onReadScheduler = onReadScheduler,
+                            onSaveSchedulerProfile = onSaveSchedulerProfile,
         )
     }
 }
@@ -5270,7 +5315,7 @@ private fun DeviceControlTopStrip(
                         enabled = scopeSummary.targetCount > 0,
                         filled = false,
                         label = "Sync",
-                        buttonSize = 40.dp,
+                        buttonSize = 48.dp,
                         onClick = onResync,
                     )
                     PreviewTransportButton(
@@ -5279,7 +5324,7 @@ private fun DeviceControlTopStrip(
                         enabled = scopeSummary.targetCount > 0,
                         filled = false,
                         label = "Preview",
-                        buttonSize = 40.dp,
+                        buttonSize = 48.dp,
                         onClick = onOpenPreview,
                     )
                 }
@@ -5299,6 +5344,14 @@ private fun DeviceControlTopStrip(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
+
+            if (session.configurationPendingApply) {
+                Text(
+                    text = "Settings pending — stop recording, then read System, DSP1 and DSP2 to confirm.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
 
             FlowRow(
                 modifier = Modifier.fillMaxWidth(),
@@ -5718,6 +5771,8 @@ private fun ControlScreen(
     onSetSchedulerRuleEnabled: (Int, Boolean) -> Unit,
     onClearSchedulerRule: (Int) -> Unit,
     onClearScheduler: () -> Unit,
+    onReadScheduler: () -> Unit,
+    onSaveSchedulerProfile: (Int) -> Unit,
 ) {
     val activeSession = uiState.activeSession
     // Keep the active device in the compact selector even after a link drops.
@@ -5761,6 +5816,14 @@ private fun ControlScreen(
     val closedLoopPane = ClosedLoopPane.valueOf(closedLoopPaneName)
     val analysisPane = AnalysisPane.valueOf(analysisPaneName)
     val systemPane = SystemPane.valueOf(systemPaneName)
+    val taskKey = "$sectionName/$acquisitionPaneName/$closedLoopPaneName/$analysisPaneName/$systemPaneName"
+    var previousTaskKey by rememberSaveable { mutableStateOf(taskKey) }
+    LaunchedEffect(taskKey) {
+        if (previousTaskKey != taskKey) {
+            previousTaskKey = taskKey
+            controlListState.scrollToItem(0)
+        }
+    }
     var pendingSystemAction by remember { mutableStateOf<PendingConfirmAction?>(null) }
     val activeRoleIdentity = activeSession?.let { formatBleRoleIdentity(it.roleTag, it.functionTag) }.orEmpty()
 
@@ -6147,6 +6210,8 @@ private fun ControlScreen(
                             onSetSchedulerRuleEnabled = onSetSchedulerRuleEnabled,
                             onClearSchedulerRule = onClearSchedulerRule,
                             onClearScheduler = onClearScheduler,
+                            onReadScheduler = onReadScheduler,
+                            onSaveSchedulerProfile = onSaveSchedulerProfile,
                         )
                     } else {
                         EmptyStateCard("Signal tools need an active connected device.")
@@ -6365,6 +6430,8 @@ private fun SignalAnalysisCard(
     onSetSchedulerRuleEnabled: (Int, Boolean) -> Unit,
     onClearSchedulerRule: (Int) -> Unit,
     onClearScheduler: () -> Unit,
+    onReadScheduler: () -> Unit,
+    onSaveSchedulerProfile: (Int) -> Unit,
 ) {
     ControlCard(
         title = when (pane) {
@@ -6396,12 +6463,13 @@ private fun SignalAnalysisCard(
                 scope = scope,
                 targetCount = targetCount,
                 canControlScope = canControlScope,
-                onRefresh = onRefresh,
+                onRefresh = onReadScheduler,
                 onSetEnabled = onSetSchedulerEnabled,
                 onSetRule = onSetSchedulerRule,
                 onSetRuleEnabled = onSetSchedulerRuleEnabled,
                 onClearRule = onClearSchedulerRule,
                 onClearAll = onClearScheduler,
+                onSaveProfile = onSaveSchedulerProfile,
             )
         }
     }
@@ -6738,132 +6806,19 @@ private fun SchedulerAnalysisPane(
     onSetRuleEnabled: (Int, Boolean) -> Unit,
     onClearRule: (Int) -> Unit,
     onClearAll: () -> Unit,
+    onSaveProfile: (Int) -> Unit,
 ) {
-    val status = session.schedulerStatus
-    val rules = session.schedulerConfig?.rules ?: List(Ce32Protocol.SchedulerRuleCount) { SchedulerRuleUiState(id = it) }
-    var selectedRuleId by rememberSaveable(session.id) { mutableStateOf(0) }
-    val selectedRule = rules.getOrElse(selectedRuleId) { SchedulerRuleUiState(id = selectedRuleId) }
-    var hourText by remember(selectedRule) { mutableStateOf((selectedRule.timeOfDaySeconds / 3_600L).toString()) }
-    var minuteText by remember(selectedRule) { mutableStateOf(((selectedRule.timeOfDaySeconds % 3_600L) / 60L).toString()) }
-    var durationText by remember(selectedRule) { mutableStateOf((selectedRule.durationSeconds / 60L).coerceAtLeast(1L).toString()) }
-    var startAction by remember(selectedRule) { mutableStateOf(selectedRule.action != 1) }
-    var clearAllArmed by rememberSaveable(session.id) { mutableStateOf(false) }
-
-    Text(
-        "Rules run on the device even when the phone is disconnected. Set device time first; the scheduler uses the CE64 local RTC without timezone or DST handling.",
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.68f),
-    )
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        InfoPill("Schedule", if (status?.enabled == true) "On" else "Off", Modifier.weight(1f))
-        InfoPill("Clock", if (status?.clockValid == true) "Ready" else "Set time", Modifier.weight(1f))
-        InfoPill("Active", rules.count { it.enabled }.toString(), Modifier.weight(1f))
-    }
-    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        FilledTonalButton(
-            onClick = { onSetEnabled(status?.enabled != true) },
-            enabled = canControlScope,
-            modifier = Modifier.weight(1f),
-        ) { Text(scopeActionLabel(if (status?.enabled == true) "Disable schedule" else "Enable schedule", targetCount)) }
-        OutlinedButton(onClick = onRefresh, enabled = canControlScope, modifier = Modifier.weight(0.7f)) { Text("Refresh") }
-    }
-    Text("Rule", style = MaterialTheme.typography.labelLarge)
-    FlowRow(horizontalArrangement = Arrangement.spacedBy(7.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
-        rules.forEach { rule ->
-            FilterChip(
-                selected = selectedRuleId == rule.id,
-                onClick = { selectedRuleId = rule.id.coerceIn(0, Ce32Protocol.SchedulerRuleCount - 1) },
-                label = { Text("${rule.id + 1}${if (rule.enabled) " •" else ""}") },
-            )
-        }
-    }
-    Text("Rule ${selectedRuleId + 1}: ${selectedRule.triggerLabel} · ${selectedRule.actionLabel}", style = MaterialTheme.typography.bodyMedium)
-    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        FilterChip(selected = startAction, onClick = { startAction = true }, enabled = canControlScope, label = { Text("Start recording") })
-        FilterChip(selected = !startAction, onClick = { startAction = false }, enabled = canControlScope, label = { Text("Stop recording") })
-    }
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        OutlinedTextField(
-            value = hourText,
-            onValueChange = { hourText = it.filter(Char::isDigit).take(2) },
-            label = { Text("Hour") },
-            singleLine = true,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-            modifier = Modifier.weight(1f),
-        )
-        OutlinedTextField(
-            value = minuteText,
-            onValueChange = { minuteText = it.filter(Char::isDigit).take(2) },
-            label = { Text("Minute") },
-            singleLine = true,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-            modifier = Modifier.weight(1f),
-        )
-        if (startAction) {
-            OutlinedTextField(
-                value = durationText,
-                onValueChange = { durationText = it.filter(Char::isDigit).take(4) },
-                label = { Text("Min") },
-                singleLine = true,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                modifier = Modifier.weight(1f),
-            )
-        }
-    }
-    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        FilledTonalButton(
-            onClick = {
-                val hour = hourText.toIntOrNull()?.coerceIn(0, 23) ?: 0
-                val minute = minuteText.toIntOrNull()?.coerceIn(0, 59) ?: 0
-                val duration = if (startAction) (durationText.toLongOrNull()?.coerceIn(1L, 1_440L) ?: 1L) * 60L else 0L
-                onSetRule(
-                    selectedRule.copy(
-                        id = selectedRuleId,
-                        enabled = true,
-                        trigger = 0,
-                        action = if (startAction) 0 else 1,
-                        profileId = if (startAction) selectedRule.profileId else 0xFF,
-                        timeOfDaySeconds = (hour * 3_600L) + (minute * 60L),
-                        periodSeconds = 0L,
-                        durationSeconds = duration,
-                        evaluationSeconds = 60L,
-                        debounceCount = 1,
-                        maxDeferrals = 1,
-                    ),
-                )
-            },
-            enabled = canControlScope,
-            modifier = Modifier.weight(1f),
-        ) { Text(scopeActionLabel("Save daily rule", targetCount)) }
-        OutlinedButton(
-            onClick = { onSetRuleEnabled(selectedRuleId, !selectedRule.enabled) },
-            enabled = canControlScope,
-            modifier = Modifier.weight(0.72f),
-        ) { Text(if (selectedRule.enabled) "Disable" else "Enable") }
-    }
-    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        OutlinedButton(
-            onClick = { onClearRule(selectedRuleId) },
-            enabled = canControlScope,
-            modifier = Modifier.weight(1f),
-        ) { Text("Clear rule") }
-        OutlinedButton(
-            onClick = {
-                if (clearAllArmed) {
-                    clearAllArmed = false
-                    onClearAll()
-                } else {
-                    clearAllArmed = true
-                }
-            },
-            enabled = canControlScope,
-            modifier = Modifier.weight(1f),
-        ) { Text(if (clearAllArmed) "Tap again to clear all" else "Clear all") }
-    }
-    Text(
-        "This editor covers daily start/stop rules. The full CE64 API—including one-shot, periodic, conditional, signal rules, and 512-byte recording profiles—is available through the same Android BLE protocol for future dedicated workflows.",
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+    SchedulerRuleEditor(
+        session = session,
+        targetCount = targetCount,
+        canControl = canControlScope,
+        onRefresh = onRefresh,
+        onSetEnabled = onSetEnabled,
+        onSetRule = onSetRule,
+        onSetRuleEnabled = onSetRuleEnabled,
+        onClearRule = onClearRule,
+        onClearAll = onClearAll,
+        onSaveProfile = onSaveProfile,
     )
 }
 
@@ -7710,10 +7665,12 @@ private fun PocketAcquisitionDeckCard(
         ControlScope.AllConnected -> "All"
     }
     val cameraLabel = when {
+        parsed == null -> "Not read"
         parsed?.cameraEnabled == true -> "${parsed.cameraSamplingRate} Hz"
         else -> "Off"
     }
     val adcLabel = when {
+        parsed == null -> "Not read"
         parsed?.adcEnabled == true -> "${parsed.adcSamplingRate} Hz"
         else -> "Off"
     }
@@ -7731,9 +7688,22 @@ private fun PocketAcquisitionDeckCard(
         }
 
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            InfoPill("FS", formatRateLabel(parsed?.ephysSamplingRate), Modifier.weight(1f))
+            InfoPill("Sample rate", formatRateLabel(parsed?.ephysSamplingRate), Modifier.weight(1f))
             InfoPill("Camera", cameraLabel, Modifier.weight(1f))
             InfoPill("ADC", adcLabel, Modifier.weight(1f))
+        }
+
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            InfoPill("Ephys channels", parsed?.ephysChannelCount?.toString() ?: "Not read", Modifier.weight(1f))
+            InfoPill("Firmware", session?.swVersion ?: "Not read", Modifier.weight(1f))
+            InfoPill("Hardware", session?.hwVersion ?: "Not read", Modifier.weight(1f))
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            val voltage = session?.voltage ?: session?.advertisedVoltage
+            InfoPill("Battery", voltage?.let { "%.2f V".format(Locale.US, it) } ?: "Not reported", Modifier.weight(1f))
+            InfoPill("Storage used", session?.advertisedHealthStatus?.storageUsedPercent?.let { "$it%" }
+                ?: session?.usedSpaceMb?.let { "%.1f MB".format(Locale.US, it) } ?: "Not reported", Modifier.weight(1f))
+            InfoPill("Schedule", when (session?.schedulerStatus?.enabled) { true -> "Enabled"; false -> "Disabled"; null -> "Not read" }, Modifier.weight(1f))
         }
 
         if (SHOW_UI_DESCRIPTIONS) {
@@ -7762,8 +7732,8 @@ private fun PocketAcquisitionDeckCard(
 
         if (compactSingleDevice) {
             Text(
-                "Use Rates, Camera, or Impedance above for their specific tools.",
-                style = MaterialTheme.typography.bodySmall,
+                "Use the Task menu for sampling, stimulation, signal tools, recording schedules, and firmware updates. Reading settings confirms what this device reports; its name alone does not confirm firmware support.",
+                style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.68f),
             )
         }
@@ -9248,7 +9218,7 @@ private fun SystemLifecycleCard(
             fontWeight = FontWeight.SemiBold,
         )
         Text(
-            "Choose the same single fused CE64 .hex firmware used by the PC console. The app validates and converts it to BLE staging blocks locally.",
+            "Choose the single fused .hex for this device's hardware variant. BLE installs only its application, not the bootloader or resident recovery service. The installed firmware must support BLE staging. CRC checks file integrity; the file does not provide a reliable CE64/CE128 board-identity check.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.68f),
         )
@@ -10088,61 +10058,36 @@ private fun SingleDeviceControlSelectorRow(
     onSystemPaneChange: (SystemPane) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(horizontal = 4.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        CompactDropdownSelector(
-            currentLabel = section.label,
-            options = ControlSection.entries.map { it.name to it.label },
-            selectedOptionName = section.name,
-            onSelectOption = { onSectionChange(ControlSection.valueOf(it)) },
-            compact = true,
-            modifier = Modifier.weight(if (section == ControlSection.Io) 1f else 0.95f),
-        )
-        when (section) {
-            ControlSection.Acquisition -> CompactDropdownSelector(
-                currentLabel = acquisitionPane.label,
-                options = AcquisitionPane.entries.map { it.name to it.label },
-                selectedOptionName = acquisitionPane.name,
-                onSelectOption = { onAcquisitionPaneChange(AcquisitionPane.valueOf(it)) },
-                compact = true,
-                modifier = Modifier.weight(1.05f),
-            )
-
-            ControlSection.ClosedLoop -> CompactDropdownSelector(
-                currentLabel = closedLoopPane.label,
-                options = ClosedLoopPane.entries.map { it.name to it.label },
-                selectedOptionName = closedLoopPane.name,
-                onSelectOption = { onClosedLoopPaneChange(ClosedLoopPane.valueOf(it)) },
-                compact = true,
-                modifier = Modifier.weight(1.05f),
-            )
-
-            ControlSection.Analysis -> CompactDropdownSelector(
-                currentLabel = analysisPane.label,
-                options = AnalysisPane.entries.map { it.name to it.label },
-                selectedOptionName = analysisPane.name,
-                onSelectOption = { onAnalysisPaneChange(AnalysisPane.valueOf(it)) },
-                compact = true,
-                modifier = Modifier.weight(1.05f),
-            )
-
-            ControlSection.System -> CompactDropdownSelector(
-                currentLabel = systemPane.label,
-                options = SystemPane.entries.map { it.name to it.label },
-                selectedOptionName = systemPane.name,
-                onSelectOption = { onSystemPaneChange(SystemPane.valueOf(it)) },
-                compact = true,
-                modifier = Modifier.weight(1.05f),
-            )
-
-            ControlSection.Io -> Unit
-        }
+    val selected = when (section) {
+        ControlSection.Acquisition -> "acq:${acquisitionPane.name}"
+        ControlSection.ClosedLoop -> "cl:${closedLoopPane.name}"
+        ControlSection.Analysis -> "analysis:${analysisPane.name}"
+        ControlSection.System -> "system:${systemPane.name}"
+        ControlSection.Io -> "io"
     }
+    val tasks = buildList {
+        addAll(AcquisitionPane.entries.map { "acq:${it.name}" to "Acquisition · ${it.label}" })
+        addAll(ClosedLoopPane.entries.map { "cl:${it.name}" to "Closed-loop · ${it.label}" })
+        addAll(AnalysisPane.entries.map { "analysis:${it.name}" to it.label })
+        add("io" to "I/O · LED, GPIO & trigger output")
+        addAll(SystemPane.entries.map { "system:${it.name}" to it.label })
+    }
+    CompactDropdownSelector(
+        currentLabel = "Task: " + tasks.first { it.first == selected }.second,
+        options = tasks,
+        selectedOptionName = selected,
+        onSelectOption = { target ->
+            val lane = target.substringAfter(':')
+            when (target.substringBefore(':')) {
+                "acq" -> { onSectionChange(ControlSection.Acquisition); onAcquisitionPaneChange(AcquisitionPane.valueOf(lane)) }
+                "cl" -> { onSectionChange(ControlSection.ClosedLoop); onClosedLoopPaneChange(ClosedLoopPane.valueOf(lane)) }
+                "analysis" -> { onSectionChange(ControlSection.Analysis); onAnalysisPaneChange(AnalysisPane.valueOf(lane)) }
+                "system" -> { onSectionChange(ControlSection.System); onSystemPaneChange(SystemPane.valueOf(lane)) }
+                else -> onSectionChange(ControlSection.Io)
+            }
+        },
+        modifier = modifier.fillMaxWidth(),
+    )
 }
 
 @Composable
@@ -10182,7 +10127,7 @@ private fun CompactDropdownSelector(
             ) {
                 Text(
                     text = currentLabel,
-                    style = if (compact) MaterialTheme.typography.labelSmall else MaterialTheme.typography.labelMedium,
+                    style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.9f),
                     modifier = Modifier.weight(1f),
                     maxLines = 1,
@@ -16339,11 +16284,22 @@ private fun advertisementStateLabel(session: DeviceSessionUiState): String {
 
 private fun advertisementSourceLabel(session: DeviceSessionUiState): String {
     return when {
+        session.advertisedHealthStatus?.isAiAdvertisementPage == true -> "CE64 V8 AI advertisement"
         session.advertisedHealthStatus != null -> "CE64 v${session.advertisedHealthStatus.formatVersion} health/storage advertisement"
         session.hasAdvertisementTelemetry -> "Advertisement telemetry received"
         session.advertisedServiceMatch -> "CE service advertised"
         session.namePrefixMatch -> "CE name advertised"
         else -> "BLE advertisement"
+    }
+}
+
+private fun advertisementAiLabel(status: Ce64AdvertisementStatus): String {
+    return buildString {
+        append("AI")
+        status.aiModelId?.let { modelId -> append(" M$modelId") }
+        status.aiClassId?.let { classId -> append(" C$classId") }
+        status.aiConfidencePercentage?.let { confidence -> append(" $confidence%") }
+        if (status.aiResultIsNew) append(" new")
     }
 }
 

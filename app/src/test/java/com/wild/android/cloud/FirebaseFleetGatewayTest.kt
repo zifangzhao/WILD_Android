@@ -1,6 +1,7 @@
 package com.wild.android.cloud
 
 import com.wild.android.ble.BleHostSessionState
+import com.wild.android.ble.Ce64AdvertisementStatus
 import com.wild.android.ble.DeviceSessionUiState
 import com.wild.android.ble.AdvertisementStatusSampleUiState
 import com.wild.android.ble.RssiSampleUiState
@@ -128,6 +129,61 @@ class FirebaseFleetGatewayTest {
             cloudSnapshotFingerprint(original),
             cloudSnapshotFingerprint(original.copy(rssiDbm = -90, lastSeenAtMs = 190_000L)),
         )
+    }
+
+    @Test
+    fun snapshotPublishesAiAdvertisementFieldsWithoutLettingAgeCauseExtraWrites() {
+        val aiAdvertisement = Ce64AdvertisementStatus(
+            formatVersion = 8,
+            recording = true,
+            previewing = false,
+            bootModuleStatusPacked = 0xFF,
+            lastEventCode = 0,
+            failedSubsystems = 0,
+            degradedSubsystems = 0,
+            batteryVoltage = null,
+            storageUsedPercent = null,
+            recordingSeconds = 0L,
+            isAiAdvertisementPage = true,
+            advertisedSampleRateHz = 30_000,
+            hasAiResult = true,
+            aiResultIsNew = true,
+            aiModelId = 4,
+            aiClassId = 9,
+            aiConfidencePercentage = 94,
+            aiEventSequence = 17,
+            aiResultAgeSeconds = 1,
+        )
+        val session = DeviceSessionUiState(
+            id = "device-ai",
+            name = "Device AI",
+            address = "AA:BB:CC:DD:EE:FF",
+            traceColorArgb = 0xFF1687F2.toInt(),
+            advertisedHealthStatus = aiAdvertisement,
+            lastSeenAtMs = 100_000L,
+            lastAiAdvertisementAtMs = 100_000L,
+            lastAiResultAtMs = 100_000L,
+        )
+
+        val snapshot = cloudDeviceSnapshot(session, "gateway-1", "Field Phone", 110_000L)
+        val fields = snapshot.toFirestoreFields()
+
+        assertEquals(30_000, fields["advertisedSampleRateHz"])
+        assertEquals(4, fields["aiModelId"])
+        assertEquals(94, fields["aiConfidencePercentage"])
+        assertEquals(100_000L, fields["aiResultAdvertisedAtMs"])
+        assertEquals(
+            cloudSnapshotFingerprint(snapshot),
+            cloudSnapshotFingerprint(snapshot.copy(aiResultAgeSeconds = 2)),
+        )
+        assertEquals(cloudSnapshotFingerprint(snapshot), cloudSnapshotFingerprint(snapshot.copy(
+            aiClassId = 2, aiConfidencePercentage = 80, aiEventSequence = 18, aiResultIsNew = false)))
+        val heartbeat = cloudDeviceSnapshot(session.copy(lastSeenAtMs = 200_000L), "gateway-1", "Field Phone", 210_000L)
+        assertEquals(100_000L, heartbeat.aiResultAdvertisedAtMs, "A later name-only advertisement is not a new AI observation")
+        val noResult = cloudDeviceSnapshot(session.copy(
+            advertisedHealthStatus = aiAdvertisement.copy(hasAiResult = false, aiModelId = null),
+            lastAiAdvertisementAtMs = 200_000L), "gateway-1", "Field Phone", 210_000L)
+        assertEquals(false, noResult.toFirestoreFields()["aiHasResult"])
     }
 
     @Test

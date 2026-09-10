@@ -167,12 +167,12 @@ class Ce32FrameParserTest {
     }
 
     @Test
-    fun parserUsesSessionResolverForVariableLengthSchedulerReplies() {
+    fun parserUsesEchoEvenWhenSessionResolverExpectsAnotherSchedulerReply() {
         val frames = mutableListOf<Pair<Int, ByteArray>>()
-        val payload = ByteArray(33) { it.toByte() }
+        val payload = ByteArray(33) { it.toByte() }.also { it[0] = 0xD0.toByte() }
         val parser = Ce32FrameParser(
             payloadLengthResolver = { commandId ->
-                if (commandId == Ce32Protocol.SchedulerResponse) 33 else null
+                if (commandId == Ce32Protocol.SchedulerResponse) 2 else null
             },
             onFrame = { commandId, received -> frames += commandId to received },
         )

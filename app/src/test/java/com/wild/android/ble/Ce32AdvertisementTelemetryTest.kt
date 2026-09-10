@@ -57,7 +57,7 @@ class Ce32AdvertisementTelemetryTest {
         assertFalse(status.previewing)
         assertEquals(0x07, status.bootModuleStatusPacked)
         assertEquals(0, status.lastEventCode)
-        assertEquals(4.96, status.batteryVoltage, 1e-9)
+        assertEquals(4.96, assertNotNull(status.batteryVoltage), 1e-9)
         assertEquals(25, status.storageUsedPercent)
         assertEquals(3600L, status.recordingSeconds)
         assertEquals(
@@ -133,6 +133,44 @@ class Ce32AdvertisementTelemetryTest {
         assertEquals(0x012345L, merged.recordingSeconds)
         assertEquals(37.0, assertNotNull(merged.auxTemperatureCelsius), 1e-9)
         assertEquals(29.5, assertNotNull(merged.mcuTemperatureCelsius), 1e-9)
+    }
+
+    @Test
+    fun parsesV8AiAdvertisementAndRetainsTheLastHealthPage() {
+        val health = assertNotNull(
+            Ce32AdvertisementTelemetry.parseCe64StatusPayload(
+                "CE450700000000F819100E".encodeToByteArray(),
+            ),
+        )
+        val ai = assertNotNull(
+            Ce32AdvertisementTelemetry.parseCe64StatusPayload(
+                // V8: recording + AI valid + new, model 4, class 9, 94%, event 17,
+                // 30 kHz sample rate, and a 12-second event age.
+                "CE8D04095E110030750C00".encodeToByteArray(),
+            ),
+        )
+
+        assertTrue(ai.isAiAdvertisementPage)
+        assertTrue(ai.recording)
+        assertNull(ai.batteryVoltage)
+        assertEquals(30_000, ai.advertisedSampleRateHz)
+        assertTrue(ai.hasAiResult)
+        assertTrue(ai.aiResultIsNew)
+        assertEquals(4, ai.aiModelId)
+        assertEquals(9, ai.aiClassId)
+        assertEquals(94, ai.aiConfidencePercentage)
+        assertEquals(17, ai.aiEventSequence)
+        assertEquals(12, ai.aiResultAgeSeconds)
+
+        val merged = assertNotNull(Ce32AdvertisementTelemetry.mergeStatusPages(health, ai))
+        assertEquals(4.96, assertNotNull(merged.batteryVoltage), 1e-9)
+        assertEquals(25, merged.storageUsedPercent)
+        assertEquals(30_000, merged.advertisedSampleRateHz)
+        assertEquals(4, merged.aiModelId)
+
+        val returnToHealth = assertNotNull(Ce32AdvertisementTelemetry.mergeStatusPages(merged, health))
+        assertEquals(4, returnToHealth.aiModelId)
+        assertFalse(returnToHealth.aiResultIsNew)
     }
 
     @Test

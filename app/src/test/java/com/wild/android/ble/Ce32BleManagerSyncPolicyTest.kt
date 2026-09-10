@@ -81,6 +81,27 @@ class Ce32BleManagerSyncPolicyTest {
     }
 
     @Test
+    fun recordingAttachReplyDoesNotStartTheNormalBootstrap() {
+        val attach = SyncStatus(
+            mode = 0x06,
+            offsetSeconds = null,
+            accuracySeconds = null,
+            delaySeconds = null,
+            sampleCount = 0,
+        )
+
+        assertFalse(isTrustedInitialSyncCompletion(attach))
+        assertTrue(isRecordingAttachSyncMode(attach))
+    }
+
+    @Test
+    fun configurationWritesAreDeferredForAnActiveOrAttachedRecorder() {
+        assertTrue(shouldDeferConfigurationApply(isRecordingLike = true, isRecordingAttach = false))
+        assertTrue(shouldDeferConfigurationApply(isRecordingLike = false, isRecordingAttach = true))
+        assertFalse(shouldDeferConfigurationApply(isRecordingLike = false, isRecordingAttach = false))
+    }
+
+    @Test
     fun validDeviceTimeExchangeCompletesAHandshakeWithoutA82Reply() {
         assertTrue(
             shouldPromoteInitialSyncFrom8DProbe(

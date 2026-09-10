@@ -445,14 +445,16 @@ object Ce32Protocol {
 
     fun buildSchedulerListRequest(): ByteArray = frame(SchedulerCommandList)
 
-    fun buildSchedulerRuleUpdate(rule: SchedulerRuleUiState): ByteArray =
-        frame(SchedulerCommandSetRule, schedulerRuleBytes(rule))
+    fun buildSchedulerRuleUpdate(rule: SchedulerRuleUiState): ByteArray {
+        require(Ce64Scheduler.validationError(rule) == null) { Ce64Scheduler.validationError(rule).orEmpty() }
+        return frame(SchedulerCommandSetRule, schedulerRuleBytes(rule))
+    }
 
     fun buildSchedulerRuleEnable(ruleId: Int, enabled: Boolean): ByteArray =
-        frame(SchedulerCommandEnableRule, byteArrayOf(ruleId.coerceIn(0, SchedulerRuleCount - 1).toByte(), if (enabled) 1 else 0))
+        frame(SchedulerCommandEnableRule, byteArrayOf(schedulerIndex(ruleId, SchedulerRuleCount), if (enabled) 1 else 0))
 
     fun buildSchedulerRuleClear(ruleId: Int): ByteArray =
-        frame(SchedulerCommandClearRule, byteArrayOf(ruleId.coerceIn(0, SchedulerRuleCount - 1).toByte()))
+        frame(SchedulerCommandClearRule, byteArrayOf(schedulerIndex(ruleId, SchedulerRuleCount)))
 
     fun buildSchedulerClearAll(): ByteArray = frame(SchedulerCommandClearAll, byteArrayOf(0x5A))
 
@@ -463,20 +465,25 @@ object Ce32Protocol {
         frame(
             SchedulerCommandProfileRead,
             byteArrayOf(
-                profileId.coerceIn(0, SchedulerRuleCount - 1).toByte(),
-                chunkIndex.coerceIn(0, SchedulerProfileChunkCount - 1).toByte(),
+                schedulerIndex(profileId, SchedulerRuleCount),
+                schedulerIndex(chunkIndex, SchedulerProfileChunkCount),
             ),
         )
 
     fun buildSchedulerProfileWrite(profileId: Int, chunkIndex: Int, data: ByteArray): ByteArray {
-        val chunk = data.copyOf(SchedulerProfileChunkBytes)
+        require(data.size == SchedulerProfileChunkBytes) { "A recording profile chunk must contain exactly 32 bytes." }
         return frame(
             SchedulerCommandProfileWrite,
             byteArrayOf(
-                profileId.coerceIn(0, SchedulerRuleCount - 1).toByte(),
-                chunkIndex.coerceIn(0, SchedulerProfileChunkCount - 1).toByte(),
-            ) + chunk,
+                schedulerIndex(profileId, SchedulerRuleCount),
+                schedulerIndex(chunkIndex, SchedulerProfileChunkCount),
+            ) + data,
         )
+    }
+
+    private fun schedulerIndex(value: Int, count: Int): Byte {
+        require(value in 0 until count) { "Scheduler slot/chunk is outside the supported range." }
+        return value.toByte()
     }
 
     fun schedulerResponsePayloadLengthFor(requestCommand: Int): Int? = when (requestCommand) {
@@ -764,14 +771,33 @@ object Ce32Protocol {
     }
 
     fun parseSchedulerConfig(payload: ByteArray): SchedulerConfigUiState? {
-        if (payload.size < SchedulerConfigBytes || u16(payload, 4) != 2 || u16(payload, 6) != SchedulerConfigBytes) {
+        if (payload.size != SchedulerConfigBytes || u32(payload, 0) != 0x53434844L ||
+            u16(payload, 4) != 2 || u16(payload, 6) != SchedulerConfigBytes || u32(payload, 12) !in 0L..1L) {
             return null
+        }
+        // Firmware returns this precise RAM-only image before the first save.
+        val pristine = u32(payload, 8) == 0L && u32(payload, 12) == 1L &&
+            payload.drop(16).all { it == 0.toByte() }
+        val crc = java.util.zip.CRC32().apply { update(payload, 0, 464) }.value
+        if (!pristine && (u32(payload, 468) != 0x434D4954L || u32(payload, 464) != crc)) return null
+        val rules = List(SchedulerRuleCount) { index ->
+            val offset = 16 + index * SchedulerRuleBytes
+            if (payload.copyOfRange(offset, offset + SchedulerRuleBytes).all { it == 0.toByte() }) {
+                SchedulerRuleUiState(id = index)
+            } else {
+                val rule = parseSchedulerRule(payload, offset)
+                if (rule.id != index || (payload[offset + 1].toInt() and 0xFE) != 0 ||
+                    (rule.enabled && Ce64Scheduler.validationError(rule) != null)) return null
+                rule
+            }
         }
         return SchedulerConfigUiState(
             version = u16(payload, 4),
             generation = u32(payload, 8),
             enabled = u32(payload, 12) != 0L,
-            rules = List(SchedulerRuleCount) { index -> parseSchedulerRule(payload, 16 + index * SchedulerRuleBytes) },
+            // Empty slots are all zeros on the wire, including their ID. Keep
+            // slot identity so selecting rule 2–8 cannot silently edit rule 1.
+            rules = rules,
             profileCrc32 = List(SchedulerRuleCount) { index -> u32(payload, 400 + index * 4) },
             profileGenerations = List(SchedulerRuleCount) { index -> u32(payload, 432 + index * 4) },
         )
