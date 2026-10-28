@@ -21,7 +21,7 @@ object Ce32Protocol {
     val HwVersionUuid: UUID = UUID.fromString("00002a27-0000-1000-8000-00805f9b34fb")
 
     val ServiceParcelUuid: ParcelUuid = ParcelUuid(ServiceUuid)
-    private val acceptedPrefixes = listOf("CE32", "CE64", "CE128", "WILD", "XENP")
+    private val acceptedPrefixes = listOf("CE32", "CE64", "CE128", "WILD", "XENP", "XE_NP")
     // Match the CE32 online-console menu and the 0x32 (quick FS) command.
     // FS = 0 is an intentional acquisition-off value, not an invalid rate.
     val CommonEphysRates = listOf(0, 1250, 2500, 5000, 10000, 20000)

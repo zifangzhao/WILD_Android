@@ -545,6 +545,7 @@ data class DeviceSessionUiState(
     val name: String,
     val address: String,
     val traceColorArgb: Int,
+    val neuropixels: NpDeviceUiState = NpDeviceUiState(),
     val advertisedServiceMatch: Boolean = false,
     val namePrefixMatch: Boolean = false,
     val verifiedTransport: Boolean = false,
@@ -670,6 +671,9 @@ data class DeviceSessionUiState(
             BleHostSessionState.Recording,
             BleHostSessionState.StoppingRecording,
         )
+
+    val isNeuropixels: Boolean
+        get() = neuropixels.status != null || NpBleProtocol.matchesName(name)
 
     val isRecordingLike: Boolean
         get() = hostState in setOf(

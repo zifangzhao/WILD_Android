@@ -965,8 +965,11 @@ class Ce32BleManager(
     }
 
     suspend fun startRecording(deviceIds: List<String>) {
+        val npTargets = neuropixelsTargets(deviceIds)
+        for (handle in npTargets) handle.npSession?.start()
         val targets = connectedTargets(deviceIds)
         if (targets.isEmpty()) {
+            if (npTargets.isNotEmpty()) return
             _statusBanner.value = "No connected BLE device is available for recording."
             return
         }
@@ -983,10 +986,13 @@ class Ce32BleManager(
     }
 
     suspend fun stopRecording(deviceIds: List<String>) {
+        val npTargets = neuropixelsTargets(deviceIds)
+        for (handle in npTargets) handle.npSession?.stop()
         val stopTargets = connectedTargets(deviceIds).filter { handle ->
             currentState(handle.id)?.let(::canStopRecording) == true
         }
         if (stopTargets.isEmpty()) {
+            if (npTargets.isNotEmpty()) return
             _statusBanner.value = "No selected device is recording."
             return
         }
@@ -995,8 +1001,11 @@ class Ce32BleManager(
     }
 
     suspend fun forceStopRecording(deviceIds: List<String>) {
+        val npTargets = neuropixelsTargets(deviceIds)
+        for (handle in npTargets) handle.npSession?.stop()
         val targets = connectedTargets(deviceIds)
         if (targets.isEmpty()) {
+            if (npTargets.isNotEmpty()) return
             _statusBanner.value = "No connected BLE device is available for a record stop."
             return
         }
@@ -1179,6 +1188,7 @@ class Ce32BleManager(
     }
 
     suspend fun requestResync(deviceIds: List<String>, suppressRtcWrite: Boolean = false) {
+        for (handle in neuropixelsTargets(deviceIds)) handle.npSession?.syncClock()
         for (handle in connectedTargets(deviceIds)) {
             if (isRecorderControlPlaneProtected(handle)) {
                 startPackedTimeLoop(handle)
@@ -2849,7 +2859,49 @@ class Ce32BleManager(
     }
 
     private fun connectedTargets(deviceIds: List<String>): List<SessionHandle> {
-        return deviceIds.mapNotNull { handles[it] }.filter { isConnected(it.id) }
+        return deviceIds.distinct().mapNotNull { handles[it] }.filter { isConnected(it.id) && currentState(it.id)?.isNeuropixels != true }
+    }
+
+    private fun neuropixelsTargets(deviceIds: List<String>) = deviceIds.distinct().mapNotNull { handles[it] }
+        .filter { isConnected(it.id) && currentState(it.id)?.isNeuropixels == true }
+
+    suspend fun controlNeuropixels(deviceId: String, action: NpAction, mask: Int = 0, rate: Int = 0, seconds: Int = 0, acceptUnqualified: Boolean = false) {
+        val session = handles[deviceId]?.npSession
+        if (session == null) { _statusBanner.value = "Wait for the Neuropixels connection to finish, or reconnect the device."; return }
+        when (action) {
+            NpAction.ReadStatus -> session.refresh()
+            NpAction.ApplyProfile -> session.selectProfile(mask, rate)
+            NpAction.Start -> session.start(seconds, acceptUnqualified)
+            NpAction.Stop -> session.stop()
+            NpAction.SyncTime -> session.syncClock()
+            NpAction.Mount -> session.mount()
+            NpAction.UsbStreaming -> session.mode(2)
+            NpAction.Loader -> session.mode(1)
+            NpAction.Dfu -> session.mode(3)
+        }
+    }
+
+    private fun startNeuropixelsSession(handle: SessionHandle) {
+        handle.useLegacyWakePrefix = false
+        handle.npSession?.close()
+        handle.npSession = NpBleSession(ioScope, write = { frame ->
+            writeCommand(handle, frame, "Neuropixels control", surfaceMessage = false, surfaceEvent = false, neuropixelsCommand = true)
+        }, publish = { state ->
+            updateSession(handle.id) { old ->
+                val status = state.status
+                val host = when {
+                    status == null -> BleHostSessionState.Syncing
+                    status.version == 2 && status.state == 4 || status.version == 1 && status.state == 2 -> BleHostSessionState.StoppingRecording
+                    status.version == 2 && status.state == 3 || status.version == 1 && status.state == 1 -> BleHostSessionState.Recording
+                    status.recording -> BleHostSessionState.StartingRecording
+                    else -> BleHostSessionState.Synced
+                }
+                old.copy(neuropixels = state, hostState = host, statusText = status?.stateLabel ?: "Identifying Neuropixels…",
+                    awaitingLiveSync = false, recordingSeconds = status?.recordedSeconds ?: old.recordingSeconds,
+                    syncText = state.clockMessage, lastFailure = state.failure, lastMessage = state.message)
+            }
+        })
+        handle.npSession?.connect()
     }
 
     private suspend fun exportRecordInfoToFile(
@@ -3552,11 +3604,12 @@ class Ce32BleManager(
         val serviceMatch = Ce32Protocol.hasExpectedService(record)
         val nameMatch = Ce32Protocol.matchesKnownNamePrefix(name)
         val hasManufacturerPayload = Ce32AdvertisementTelemetry.hasManufacturerPayload(record)
-        val advertisedHealthStatus = Ce32AdvertisementTelemetry.parseCe64Status(record)
-        val advertisedVoltage = Ce32AdvertisementTelemetry.parseVoltage(record)
+        val neuropixelsName = NpBleProtocol.matchesName(trimmedName)
+        val advertisedHealthStatus = if (neuropixelsName) null else Ce32AdvertisementTelemetry.parseCe64Status(record)
+        val advertisedVoltage = if (neuropixelsName) null else Ce32AdvertisementTelemetry.parseVoltage(record)
         val hasAdvertisementTelemetry = hasManufacturerPayload || advertisedVoltage != null || advertisedHealthStatus != null
         val previousSession = _sessions.value[id]
-        val mergedAdvertisementStatus = Ce32AdvertisementTelemetry.mergeStatusPages(
+        val mergedAdvertisementStatus = if (neuropixelsName) null else Ce32AdvertisementTelemetry.mergeStatusPages(
             previousSession?.advertisedHealthStatus,
             advertisedHealthStatus,
         )
@@ -3615,7 +3668,7 @@ class Ce32BleManager(
                     voltage = advertisedVoltage,
                     timestampMs = seenAtMs,
                 ),
-                advertisedVoltage = mergedAdvertisementStatus?.batteryVoltage ?: advertisedVoltage ?: previous?.advertisedVoltage,
+                advertisedVoltage = if (neuropixelsName) null else mergedAdvertisementStatus?.batteryVoltage ?: advertisedVoltage ?: previous?.advertisedVoltage,
                 advertisedHealthStatus = mergedAdvertisementStatus,
                 lastStatusAdvertisementAtMs = if (advertisedHealthStatus != null) seenAtMs else previous?.lastStatusAdvertisementAtMs ?: 0L,
                 lastHealthAdvertisementAtMs = if (advertisedHealthStatus != null && !advertisedHealthStatus.isAiAdvertisementPage) seenAtMs else previous?.lastHealthAdvertisementAtMs ?: 0L,
@@ -5239,7 +5292,7 @@ class Ce32BleManager(
         }
         persistDiscoverySessions()
 
-        startInitialBootstrap(handle)
+        if (currentState(handle.id)?.isNeuropixels == true) startNeuropixelsSession(handle) else startInitialBootstrap(handle)
         if (!handle.reconnectPending) {
             finishManualConnectPhase(handle)
         }
@@ -5254,7 +5307,12 @@ class Ce32BleManager(
         surfaceEvent: Boolean = true,
         beforeFirstChunkSend: ((ByteArray) -> Unit)? = null,
         allowDuringBleOta: Boolean = false,
+        neuropixelsCommand: Boolean = false,
     ): Boolean {
+        if (currentState(handle.id)?.isNeuropixels == true && !neuropixelsCommand) {
+            _statusBanner.value = "Use the Neuropixels controls for this WILDX device."
+            return false
+        }
         val gatt = handle.gatt ?: return false
         val tx = handle.txCharacteristic ?: return false
 
@@ -5275,7 +5333,7 @@ class Ce32BleManager(
                 "Ce32BleManager",
                 "tx device=${handle.id} label=$label bytes=${Ce32Protocol.bytesToHex(command)}",
             )
-            val mtuChunk = (handle.mtu - 3).coerceAtLeast(20)
+            val mtuChunk = if (neuropixelsCommand) 20 else (handle.mtu - 3).coerceAtLeast(20)
             var offset = 0
             var firstChunk = true
             while (offset < command.size) {
@@ -5515,6 +5573,8 @@ class Ce32BleManager(
         if (!handle.reconnectPending) {
             finishManualConnectPhase(handle)
         }
+        handle.npSession?.close()
+        handle.npSession = null
         handle.pendingWrite?.complete(false)
         handle.pendingRead?.complete(null)
         handle.pendingDescriptorWrite?.complete(false)
@@ -5608,7 +5668,7 @@ class Ce32BleManager(
                     lastMessage = reason,
                 )
             }
-            appendEvent(next, if (reconnecting) "Link dropped, reconnect pending" else reason)
+            appendEvent(next.copy(neuropixels = next.neuropixels.copy(busy = false)), if (reconnecting) "Link dropped, reconnect pending" else reason)
         }
 
         if (!handle.reconnectPending && _activeSessionId.value == deviceId) {
@@ -6083,6 +6143,10 @@ class Ce32BleManager(
 
     private fun handleIncomingNotification(handle: SessionHandle, value: ByteArray) {
         if (value.isEmpty()) {
+            return
+        }
+        if (currentState(handle.id)?.isNeuropixels == true) {
+            handle.npSession?.parser?.push(value)
             return
         }
         handle.notificationRxCount += 1
@@ -7395,6 +7459,7 @@ class Ce32BleManager(
         var device: BluetoothDevice,
         val traceColorArgb: Int,
     ) {
+        var npSession: NpBleSession? = null
         var gatt: BluetoothGatt? = null
         var dataService: BluetoothGattService? = null
         var txCharacteristic: BluetoothGattCharacteristic? = null

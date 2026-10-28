@@ -6,6 +6,21 @@ import com.wild.android.ble.DeviceSessionUiState
 /** Small last-read summaries ride the existing throttled device document.
  * No waveform samples, parameter images, extra listener, or polling is added. */
 internal fun cloudDeviceDetails(session: DeviceSessionUiState): Map<String, Any> = buildMap {
+    session.neuropixels.status?.let { status ->
+        put("neuropixels", mapOf(
+            "reportedAtMs" to session.neuropixels.reportedAtMs,
+            "version" to status.version, "probeMask" to status.probeMask,
+            "sampleRateHz" to status.sampleRate, "state" to status.state,
+            "stateLabel" to status.stateLabel, "fault" to status.fault,
+            "availableProbeMask" to session.neuropixels.availableProbeMask,
+            "recordedMiB" to status.recordedMiB,
+            "capacityGiB" to status.capacitySectors * 512.0 / 1073741824,
+            "deviceUid" to session.neuropixels.deviceUid,
+        ))
+        put("acquisition", mapOf("reportedAtMs" to session.neuropixels.reportedAtMs,
+            "channelCount" to Integer.bitCount(status.probeMask) * 384,
+            "sampleRateHz" to status.sampleRate))
+    }
     session.parsedSystemParams?.let { params ->
         put("acquisition", mapOf(
             "reportedAtMs" to session.configurationReportedAtMs,
@@ -64,7 +79,7 @@ internal fun cloudDeviceDetails(session: DeviceSessionUiState): Map<String, Any>
 
 /** Observation time changing alone must not consume an additional cloud write. */
 internal fun cloudDetailsFingerprint(details: Map<String, Any>): String = details.toSortedMap().entries.joinToString("|") { (name, fields) ->
-    val stable = (fields as? Map<*, *>)?.entries?.filterNot { it.key == "reportedAtMs" }
+    val stable = (fields as? Map<*, *>)?.entries?.filterNot { it.key in listOf("reportedAtMs", "recordedMiB") }
         ?.sortedBy { it.key.toString() }?.joinToString(",") { "${it.key}=${it.value}" }.orEmpty()
     "$name:$stable"
 }

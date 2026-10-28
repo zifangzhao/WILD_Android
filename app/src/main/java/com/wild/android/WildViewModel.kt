@@ -784,6 +784,11 @@ class WildViewModel(
         bleManager.setActiveSession(deviceId)
     }
 
+    fun controlNeuropixels(action: com.wild.android.ble.NpAction, mask: Int, rate: Int, seconds: Int, acceptUnqualified: Boolean) {
+        val id = uiState.value.activeSession?.id ?: return
+        viewModelScope.launch { bleManager.controlNeuropixels(id, action, mask, rate, seconds, acceptUnqualified) }
+    }
+
     fun focusSession(deviceId: String) {
         controlScope.value = ControlScope.ActiveDevice
         bleManager.setActiveSession(deviceId)

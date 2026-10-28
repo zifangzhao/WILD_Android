@@ -650,7 +650,14 @@ fun WildApp(
                             onBack = { destination = AppDestination.Devices },
                         )
 
-                        AppDestination.Preview -> PreviewScreen(
+                        AppDestination.Preview -> if (uiState.activeSession?.isNeuropixels == true) NeuropixelsControlScreen(
+                            session = uiState.activeSession!!,
+                            sessions = uiState.sessions,
+                            onBack = { destination = AppDestination.Devices },
+                            onSelectDevice = viewModel::setActiveSession,
+                            onLink = { uiState.activeSession?.let { if (it.isConnected || it.isLinkingLike) viewModel.disconnect(it.id) else viewModel.connect(it.id) } },
+                            onAction = viewModel::controlNeuropixels,
+                        ) else PreviewScreen(
                             modifier = Modifier.fillMaxSize(),
                             uiState = uiState,
                             onActivateSession = viewModel::setActiveSession,
@@ -729,7 +736,14 @@ fun WildApp(
                             },
                         )
 
-                        AppDestination.Control -> DeviceParameterScreen(
+                        AppDestination.Control -> if (uiState.activeSession?.isNeuropixels == true) NeuropixelsControlScreen(
+                            session = uiState.activeSession!!,
+                            sessions = uiState.sessions,
+                            onBack = { destination = AppDestination.Devices },
+                            onSelectDevice = viewModel::setActiveSession,
+                            onLink = { uiState.activeSession?.let { if (it.isConnected || it.isLinkingLike) viewModel.disconnect(it.id) else viewModel.connect(it.id) } },
+                            onAction = viewModel::controlNeuropixels,
+                        ) else DeviceParameterScreen(
                             modifier = Modifier.fillMaxSize(),
                             uiState = uiState,
                             launchSectionName = controlLaunchSectionName,
