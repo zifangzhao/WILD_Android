@@ -2865,23 +2865,15 @@ class Ce32BleManager(
     private fun neuropixelsTargets(deviceIds: List<String>) = deviceIds.distinct().mapNotNull { handles[it] }
         .filter { isConnected(it.id) && currentState(it.id)?.isNeuropixels == true }
 
-    suspend fun controlNeuropixels(deviceId: String, action: NpAction, mask: Int = 0, rate: Int = 0, seconds: Int = 0, acceptUnqualified: Boolean = false) {
+    suspend fun controlNeuropixels(deviceId: String, command: NpCommand) {
         val session = handles[deviceId]?.npSession
+        if (session == null && command.action == NpAction.StopPreview) return
         if (session == null) { _statusBanner.value = "Wait for the Neuropixels connection to finish, or reconnect the device."; return }
-        when (action) {
-            NpAction.ReadStatus -> session.refresh()
-            NpAction.ApplyProfile -> session.selectProfile(mask, rate)
-            NpAction.Start -> session.start(seconds, acceptUnqualified)
-            NpAction.Stop -> session.stop()
-            NpAction.SyncTime -> session.syncClock()
-            NpAction.Mount -> session.mount()
-            NpAction.UsbStreaming -> session.mode(2)
-            NpAction.Loader -> session.mode(1)
-            NpAction.Dfu -> session.mode(3)
-        }
+        session.execute(command)
     }
 
     private fun startNeuropixelsSession(handle: SessionHandle) {
+        val previousNp = currentState(handle.id)?.neuropixels
         handle.useLegacyWakePrefix = false
         handle.npSession?.close()
         handle.npSession = NpBleSession(ioScope, write = { frame ->
@@ -2897,10 +2889,11 @@ class Ce32BleManager(
                     else -> BleHostSessionState.Synced
                 }
                 old.copy(neuropixels = state, hostState = host, statusText = status?.stateLabel ?: "Identifying Neuropixels…",
-                    awaitingLiveSync = false, recordingSeconds = status?.recordedSeconds ?: old.recordingSeconds,
+                    awaitingLiveSync = false, recordingSeconds = state.media?.seconds ?: status?.recordedSeconds ?: old.recordingSeconds,
                     syncText = state.clockMessage, lastFailure = state.failure, lastMessage = state.message)
             }
-        })
+        }, retire = { reason -> disconnect(handle.id, reason, userRequested = true) }, retainedMaps = previousNp?.probeMaps.orEmpty(),
+            retainedClosedLoop = previousNp?.closedLoop, retainedClosedLoopUncertain = previousNp?.closedLoopUncertain == true)
         handle.npSession?.connect()
     }
 
@@ -5668,7 +5661,7 @@ class Ce32BleManager(
                     lastMessage = reason,
                 )
             }
-            appendEvent(next.copy(neuropixels = next.neuropixels.copy(busy = false)), if (reconnecting) "Link dropped, reconnect pending" else reason)
+            appendEvent(next.copy(neuropixels = next.neuropixels.copy(busy = false, preview = next.neuropixels.preview.copy(enabled = false, message = "Disconnected · last preview retained"))), if (reconnecting) "Link dropped, reconnect pending" else reason)
         }
 
         if (!handle.reconnectPending && _activeSessionId.value == deviceId) {

@@ -23,4 +23,13 @@ class CloudDeviceDetailsTest {
         assertFalse(details.containsKey("systemParamHex"))
         assertFalse(details.containsKey("address"))
     }
+    @Test fun probePayloadsReceiptsAndCatalogUiDoNotCreateCloudWritesOrUploadRawConfiguration() {
+        val original=session()
+        val map=com.wild.android.ble.NpProbeMap(2,1,4,"local.imro","source-hash",ByteArray(876))
+        val changed=original.copy(neuropixels=original.neuropixels.copy(probeMaps=listOf(map),
+            catalog=com.wild.android.ble.NpCatalogSnapshot(2,1000000,8192,emptyList(),"snapshot",false)))
+        assertEquals(cloudStatusFingerprint(listOf(original)),cloudStatusFingerprint(listOf(changed)))
+        assertFalse(cloudDeviceDetails(changed).toString().contains("source-hash"))
+        assertFalse(cloudDeviceDetails(changed).toString().contains("snapshot"))
+    }
 }

@@ -1,5 +1,9 @@
 # WILDX Neuropixels Android controls
 
+For the newer 0.1.7 operating-mode expansion and current limits, see
+[WILD-X BLE mode coverage](WILDX_BLE_MODE_COVERAGE_20261106.md).
+The text below records the original 0.1.6 implementation.
+
 ## Using the phone
 
 1. Find a device named `WILD-X…`, `WILDX…`, `XENP…`, or `XE_NP…` on Devices.
