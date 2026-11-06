@@ -93,6 +93,7 @@ class NpBleSignalsTest {
             val magic=q?.let{NpBleProtocol.u32(it,0)}?:0;val id=q?.let{NpBleProtocol.u32(it,12)}?:1
             when(magic){
                 0x3256504eL->{val kind=NpBleProtocol.u32(q!!,8);previewKinds.add(kind)
+                    if(kind==8L) {val r=ByteArray(224);put(r,0,magic);put(r,4,id);put(r,28,129L shl 8);session.parser.push(frame(r,0xba))}
                     if(kind==0L)for(offset in raw.indices step 192)session.parser.push(frame(previewFrame(2,id,0,1,0,0,0,(3200L shl 16) or offset.toLong(),raw,offset),0xba))
                     if(kind==2L)session.parser.push(frame(previewFrame(2,id,2,1,0,0,4,(192L shl 16) or 65535,ByteArray(192)),0xba))
                 }
@@ -108,7 +109,7 @@ class NpBleSignalsTest {
             assertEquals("",published.failure);assertTrue(published.preview.enabled);assertEquals(16,published.preview.points.size)
             session.execute(NpCommand(NpAction.StopPreview))
             assertFalse(published.preview.enabled);assertEquals(3,published.status!!.state)
-            assertTrue(controls.all{it==0L});assertEquals(listOf(0L,2L,3L),previewKinds)
+            assertTrue(controls.all{it==0L});assertEquals(listOf(8L,0L,2L,3L),previewKinds)
         }finally{session.close()}
     }
 }

@@ -1,7 +1,6 @@
 package com.wild.android.ui
 
 import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -11,9 +10,8 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.wild.android.ble.*
@@ -27,19 +25,25 @@ internal fun NeuropixelsControlScreen(
     session: DeviceSessionUiState, sessions: List<DeviceSessionUiState>,
     onBack: () -> Unit, onSelectDevice: (String) -> Unit, onLink: () -> Unit,
     onAction: (NpCommand) -> Unit,
+    initialPreview: Boolean = false,
 ) {
     val np = session.neuropixels; val status = np.status
     val idle = session.isConnected && !np.busy
     fun send(command: NpCommand) = onAction(command.copy(deviceId=session.id))
-    var page by rememberSaveable(session.id) { mutableStateOf("Recording") }
+    var page by rememberSaveable { mutableStateOf(if(initialPreview) "Preview" else "Recording") }
     var pending by remember(session.id) { mutableStateOf<Pair<String, NpCommand>?>(null) }
     var devicesExpanded by remember { mutableStateOf(false) }
     val scroll = rememberLazyListState()
+    val previewState=rememberSaveableStateHolder()
+    val previewCalibrations=remember { mutableStateMapOf<Triple<String,Int,Int>,NpDisplayCalibration>() }
     LaunchedEffect(page) { scroll.scrollToItem(0) }
     fun act(action: NpAction) = send(NpCommand(action))
-    DisposableEffect(session.id) {
-        val id=session.id
-        onDispose { onAction(NpCommand(NpAction.StopPreview,deviceId=id)) }
+    val currentSessions by rememberUpdatedState(sessions)
+    val currentAction by rememberUpdatedState(onAction)
+    DisposableEffect(Unit) {
+        // Include preparation in flight: Stop queues behind its validation and
+        // retires the lease even if the user leaves before the first sample.
+        onDispose { currentSessions.filter { it.isNeuropixels && it.isConnected }.forEach { currentAction(NpCommand(NpAction.StopPreview,deviceId=it.id)) } }
     }
     pending?.let { (message, command) ->
         AlertDialog(onDismissRequest = { pending = null }, title = { Text("${session.name} · confirm") }, text = { Text(message) },
@@ -68,27 +72,7 @@ internal fun NeuropixelsControlScreen(
         LazyColumn(state = scroll, verticalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.weight(1f)) {
             if(status!=null && page=="Probe maps") item { NpCard("Probe IMRO / site maps") { NpProbeControls(session,::send) { text,command -> pending=text to command } } }
             if(status!=null && page=="Closed-loop") item { NpCard("Closed-loop event detection") { NpClosedLoopControls(session,::send) { text,command -> pending=text to command } } }
-            if (status != null && page == "Preview") item { NpCard("Live preview · ${session.name}") {
-                var probe by rememberSaveable(session.id) { mutableIntStateOf(1) }
-                var channel by rememberSaveable(session.id) { mutableStateOf("0") }
-                var band by rememberSaveable(session.id) { mutableIntStateOf(0) }
-                Text("Preview observes an existing neural SD recording. Start it under Recording first. Native ADC counts are not calibrated µV; subsampling can alias high frequencies. Missing samples leave gaps.")
-                FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-                    (1..(if (status.version==1) 3 else 2)).forEach { p -> FilterChip(selected=probe==p,onClick={probe=p},enabled=idle && !np.preview.enabled && status.probeMask and (1 shl (p-1)) != 0,label={Text("P$p")},modifier=Modifier.heightIn(min=48.dp)) }
-                    (0..(if (status.version==1) 1 else 0)).forEach { b -> FilterChip(selected=band==b,onClick={band=b},enabled=idle && !np.preview.enabled,label={Text(if (b==0) "AP" else "LFP")},modifier=Modifier.heightIn(min=48.dp)) }
-                }
-                OutlinedTextField(value=channel,onValueChange={channel=it},label={Text("Channel · 0–383")},singleLine=true,enabled=!np.preview.enabled,keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number))
-                val ch=channel.toIntOrNull()
-                FlowRow(horizontalArrangement=Arrangement.spacedBy(10.dp)) {
-                    Button(onClick={send(NpCommand(NpAction.StartPreview,probe=probe,channel=ch!!,band=band))},enabled=idle && !np.preview.enabled && status.has(128) && status.state==(if (status.version==1) 1 else 3) && ch!=null && ch in 0..383,modifier=Modifier.heightIn(min=48.dp)) { Text("Show live preview") }
-                    OutlinedButton(onClick={act(NpAction.StopPreview)},enabled=idle && np.preview.enabled,modifier=Modifier.heightIn(min=48.dp)) { Text("Pause preview only") }
-                }
-                Text(np.preview.message)
-                Text("${"%.1f".format(np.preview.sampleHz)} samples/s · ${np.preview.bits}-bit ADC · ${np.preview.gaps} preview gaps")
-                NpPreviewPlot(np.preview)
-                if (status.version==2) Text("NP2 BLE carries P1/P2 AP preview only, even when P3 is being recorded. There is no NP2 LFP stream.")
-                Text("Leaving this device page pauses its preview lease, never the SD recording. Control commands take priority over preview renewal.")
-            } }
+            if (page == "Preview") item { previewState.SaveableStateProvider("preview") { NpPreviewPanel(sessions,previewCalibrations,onAction) } }
             item { NpCard("${session.name} · ${if (status?.isMedia == true) "Camera / microphone" else "Neuropixels"}") {
                 if (np.reportedAtMs > 0) Text("Last report ${time(np.reportedAtMs)} · ${np.message}")
                 if (status != null) {
@@ -231,32 +215,6 @@ internal fun NeuropixelsControlScreen(
 
 private fun probes(mask: Int) = (1..3).filter { mask and (1 shl (it-1)) != 0 }.joinToString(" + ") { "P$it" }
 private fun time(ms: Long) = DateTimeFormatter.ofPattern("HH:mm:ss").withZone(ZoneId.systemDefault()).format(Instant.ofEpochMilli(ms))
-@Composable
-private fun NpPreviewPlot(preview: NpPreviewUi) {
-    var gain by rememberSaveable { mutableFloatStateOf(1f) }
-    var window by rememberSaveable { mutableFloatStateOf(2f) }
-    val color=MaterialTheme.colorScheme.primary
-    val grid=MaterialTheme.colorScheme.outlineVariant
-    Text("Display gain ×${"%.1f".format(gain)} · window ${"%.1f".format(window)} s (display only)")
-    Slider(value=gain,onValueChange={gain=it},valueRange=0.25f..16f)
-    Slider(value=window,onValueChange={window=it},valueRange=0.25f..3f)
-    Canvas(Modifier.fillMaxWidth().height(240.dp)) {
-        for (i in 1..3) drawLine(grid,androidx.compose.ui.geometry.Offset(0f,size.height*i/4),androidx.compose.ui.geometry.Offset(size.width,size.height*i/4))
-        val points=preview.points; if (points.isEmpty() || preview.sampleHz<=0) return@Canvas
-        val last=points.last().tick; val stride=if (points.size>1) points.zipWithNext().map { it.second.tick-it.first.tick }.filter { it>0 }.minOrNull() ?: 1 else 1
-        val span=window*preview.sampleHz*stride
-        val mid=if (preview.bits==10) 512f else 2048f
-        val path=Path(); var pen=false
-        points.forEach { p ->
-            val x=((1-(last-p.tick)/span)*size.width).toFloat()
-            if (!p.value.isFinite() || x<0) pen=false else {
-                val y=(size.height/2-((p.value-mid)/mid*gain*size.height/2)).toFloat().coerceIn(0f,size.height)
-                if (pen) path.lineTo(x,y) else {path.moveTo(x,y);pen=true}
-            }
-        }
-        drawPath(path,color,style=Stroke(width=2f))
-    }
-}
 @Composable
 private fun NpCard(title: String, content: @Composable ColumnScope.() -> Unit) {
     Card(Modifier.fillMaxWidth()) { Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) { Text(title,style=MaterialTheme.typography.titleLarge); content() } }

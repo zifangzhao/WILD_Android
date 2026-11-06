@@ -76,6 +76,7 @@ data class NpCommand(
     val probe: Int = 1, val channel: Int = 0, val band: Int = 0, val deviceId: String = "",
     val probeMap: NpProbeMap? = null, val closedLoopSettings: NpClosedLoopSettings? = null,
     val catalogFingerprint: String = "",
+    val previewChannels: List<NpPreviewSelection> = emptyList(),
 )
 
 data class NpMediaProfile(val cameraHz: Int, val microphone: Boolean)

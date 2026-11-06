@@ -91,10 +91,12 @@ internal class NpBleSession(
     private suspend fun exchange(request: ByteArray) = exchange(NpBleProtocol.frame(0xB9, request)) { NpBleProtocol.matches(request, it) }
     private fun accept(body: ByteArray): NpDeviceStatus {
         val status = NpBleProtocol.status(body) ?: throw IOException("Invalid WILDX status or unsupported firmware capabilities.")
+        val previous=ui.status
         if (ui.status != null && status.version != ui.status!!.version) throw IOException("Device protocol changed; reconnect before controlling it.")
         update { it.copy(status = status, reportedAtMs = System.currentTimeMillis(), message = status.stateLabel,
             media = if (status.isMedia) it.media else null, mediaProfile = if (status.isMedia) it.mediaProfile else null) }
-        if (ui.preview.enabled && !canPreview(status,ui.preview.probe,ui.preview.band)) endPreview("Recording/profile changed — preview stopped. Re-enable after checking status.")
+        if (ui.preview.enabled && (ui.preview.traces.any { !canPreview(status,it.selection.probe,ui.preview.band) } || status.sampleRate!=ui.preview.sourceHz ||
+                previous?.let { it.startSector!=status.startSector || it.lastMutationId!=status.lastMutationId }==true)) endPreview("Recording/profile changed — preview stopped. Re-enable after checking status.")
         if (status.error != 0L) throw IOException("Device rejected operation ${status.operation}: error ${status.error}, fault ${status.fault}. Read status before trying again.")
         return status
     }
@@ -434,7 +436,8 @@ internal class NpBleSession(
         if (previewJob == null && request == null) return
         endPreview("Preview paused. Recording is independent.")
         if (request != null) {
-            val stop = request.copyOf(); NpBleProtocol.put(stop,8,3); NpBleProtocol.seal(stop)
+            val stop = if(NpBleProtocol.u32(request,8)==6L) NpMultiPreview.feedback(NpBleProtocol.u32(request,12),NpBleProtocol.u32(request,24),0,stop=true)
+                else request.copyOf().also { NpBleProtocol.put(it,8,3); NpBleProtocol.seal(it) }
             // Expendable preview only: no acknowledgement; the two-second
             // firmware lease also expires when renewal stops.
             write(NpBleProtocol.frame(0xB9,stop))
@@ -444,50 +447,80 @@ internal class NpBleSession(
         stopPreviewCore()
         delay(2100) // Previous unacknowledged preview leases must expire.
         val status = readStatus()
-        require(canPreview(status,command.probe,command.band) && command.channel in 0..383) { "Start a supported neural SD recording first. NP2 BLE preview carries P1/P2 AP only; it never starts acquisition." }
+        val selections=command.previewChannels.ifEmpty { listOf(NpPreviewSelection(command.probe,command.channel)) }.toList()
+        require(selections.size in 1..(if(status.version==1)4 else 2) && selections.distinct().size==selections.size && selections.all { canPreview(status,it.probe,command.band) && it.channel in 0..383 }) { "Select distinct supported channels in an active neural SD recording. NP2 carries P1/P2 AP only; preview never starts acquisition." }
+        require(status.version!=1 || selections.map { it.probe }.distinct().size==1) { "NP1 compact preview uses one probe and one band at a time." }
+        val selection=selections.first()
         // CL and preview share the device workspace. An unavailable/unknown
         // query must not be interpreted as 'closed-loop off'.
         val cl = readClosedLoop(2)
         require(cl.result==0L && !cl.configured) { "Preview unavailable: closed-loop is configured or its state was not confirmed. Recording remains independent." }
+        var capabilitySession=0L
+        val multi=if(status.version==2) {
+            val capsId=nextId(); val caps=exchangePreview(NpMultiPreview.capabilities(capsId)) { NpMultiPreview.matches(it,capsId) }
+            NpMultiPreview.supported(caps,capsId).also { if(it) { capabilitySession=NpBleProtocol.u32(caps,8);require(NpBleProtocol.u32(caps,12)==status.sampleRate.toLong()) { "Preview source rate changed." } } }
+        } else false
+        val compact=status.version==1 && status.has(0x08000000)
+        require(multi || compact || selections.size==1) { "This firmware supports one preview channel only. Select one trace or update the device firmware." }
         val originId = nextId(); val origin = NpBlePreview.Burst(status.version,originId)
-        val originRequest = NpBlePreview.request(status.version,originId,0,command.probe,command.channel,band=command.band)
+        val originRequest = NpBlePreview.request(status.version,originId,0,selection.probe,selection.channel,band=command.band)
         // Preview replies arrive on BA, controls stay on B9. Assemble a whole
         // origin before phase search; never guess phase from a partial burst.
         exchangePreview(originRequest) { origin.accept(it) }
-        require(origin.kind==0 && origin.probe==command.probe && origin.channel==command.channel && origin.band==command.band && origin.hz==status.sampleRate)
-        val phase = origin.phase()
+        require(origin.kind==0 && origin.probe==selection.probe && origin.channel==selection.channel && origin.band==command.band && origin.hz==status.sampleRate)
+        require(!multi || origin.session==capabilitySession) { "Recording session changed during preview capability check." }
+        val phases=selections.map { origin.phase(it.probe) }; val phase=phases.first()
         val fresh = readStatus()
-        require(canPreview(fresh,command.probe,command.band) && fresh.sampleRate==status.sampleRate && fresh.lastMutationId==status.lastMutationId && fresh.startSector==status.startSector) { "Recording changed during preview calibration." }
+        require(selections.all { canPreview(fresh,it.probe,command.band) } && fresh.probeMask==status.probeMask && fresh.sampleRate==status.sampleRate && fresh.lastMutationId==status.lastMutationId && fresh.startSector==status.startSector) { "Recording changed during preview calibration." }
         delay(550)
         val id = nextId()
-        val input = Channel<ByteArray>(8,onBufferOverflow=BufferOverflow.DROP_OLDEST)
-        val request = NpBlePreview.request(status.version,id,2,command.probe,command.channel,phase,origin.session,command.band)
+        val input = Channel<ByteArray>(32,onBufferOverflow=BufferOverflow.DROP_OLDEST)
+        val receiver=if(multi) NpMultiPreview.Receiver(id,origin.session,status.sampleRate,selections,phases) else null
+        val request = when {
+            multi -> NpMultiPreview.configure(id,origin.session,selections,phases)
+            compact -> NpMultiPreview.compactRequest(id,5,selection.probe,selections.map { it.channel },phase,origin.session,command.band)
+            else -> NpBlePreview.request(status.version,id,2,selection.probe,selection.channel,phase,origin.session,command.band)
+        }
         previewInput=input; previewRequest=request
-        update { it.copy(preview=NpPreviewUi(true,"Subsampled preview · native ADC counts, not calibrated µV",bits=if (status.version==1) 10 else 12,probe=command.probe,channel=command.channel,band=command.band)) }
+        update { it.copy(preview=NpPreviewUi(true,if(multi)"Filtered 500 Hz preview · useful band 0–200 Hz" else "Subsampled preview · aliasing possible",bits=if (status.version==1) 10 else 12,
+            probe=selection.probe,channel=selection.channel,band=command.band,traces=selections.map { s -> NpPreviewTrace(s) },sourceHz=status.sampleRate,filtered=multi)) }
         if (!write(NpBleProtocol.frame(0xB9,request))) { previewRequest=null; endPreview("Preview send failed. Recording is independent."); return@action }
         previewJob=scope.launch {
             var previousEnd=0L; var lastData=System.nanoTime(); var renewed=System.nanoTime()
             try {
                 while (isActive && ui.preview.enabled) {
                     val b=withTimeoutOrNull(150) { input.receive() }
-                    if (b!=null && NpBleProtocol.u32(b,4)==id) {
-                        val burst=NpBlePreview.Burst(status.version,id)
-                        if (burst.accept(b)) {
-                            require(burst.kind==2 && burst.session==origin.session && burst.hz==status.sampleRate && burst.probe==command.probe && burst.channel==command.channel && burst.band==command.band) { "Preview session/rate/selection changed." }
-                            if (previousEnd!=0L && burst.first<previousEnd) continue
-                            val points=burst.decode(phase)
-                            val gap=previousEnd!=0L && burst.first!=previousEnd
-                            update {
-                                val combined=it.preview.points+(if (gap) listOf(NpPreviewPoint(burst.first,Double.NaN)) else emptyList())+points
-                                it.copy(preview=it.preview.copy(points=combined.takeLast(1500),sampleHz=if (status.version==1) status.sampleRate*780.0/burst.stride else 500.0,gaps=it.preview.gaps+(if (gap || points.any { p -> p.value.isNaN() }) 1 else 0)))
+                    val frames=if(b==null || NpBleProtocol.u32(b,4)!=id) emptyList() else when {
+                        receiver!=null -> receiver.accept(b)
+                        compact -> listOfNotNull(NpMultiPreview.compact(b,id,origin.session,status.sampleRate,selection.probe,selections.map { it.channel },command.band,phase))
+                        else -> {
+                            val burst=NpBlePreview.Burst(status.version,id)
+                            if(!burst.accept(b)) emptyList() else {
+                                require(burst.kind==2 && burst.session==origin.session && burst.hz==status.sampleRate && burst.probe==selection.probe && burst.channel==selection.channel && burst.band==command.band) { "Preview session/rate/selection changed." }
+                                val midpoint=if(status.version==1)512.0 else 2048.0
+                                listOf(NpMultiPreview.Frame(0,burst.first,burst.stride,0,listOf(burst.decode(phase).map { p -> p.copy(value=midpoint-p.value) })))
                             }
-                            previousEnd=burst.first+16*burst.stride; lastData=System.nanoTime()
+                        }
+                    }
+                    frames.forEach { frame ->
+                        if(previousEnd==0L || frame.first>=previousEnd) {
+                            val gap=previousEnd!=0L && frame.first!=previousEnd
+                            update { current ->
+                                val traces=current.preview.traces.mapIndexed { lane,trace ->
+                                    val points=frame.traces[lane]
+                                    trace.copy(points=(trace.points+(if(gap)listOf(NpPreviewPoint(points.first().tick,Double.NaN)) else emptyList())+points).takeLast(5000))
+                                }
+                                current.copy(preview=current.preview.copy(traces=traces,points=traces.first().points,stride=frame.stride,
+                                    sampleHz=status.sampleRate*(if(status.version==1)780.0 else 1600.0)/frame.stride,
+                                    updatedAtMs=System.currentTimeMillis(),gaps=current.preview.gaps+(if(gap || frame.traces.any { t -> t.any { it.value.isNaN() } })1 else 0)))
+                            }
+                            previousEnd=frame.first+frame.traces.first().size*frame.stride; lastData=System.nanoTime()
                         }
                     }
                     val now=System.nanoTime()
                     if (now-lastData>5_000_000_000) throw IOException("Preview data stopped. Read status and re-enable preview; recording is independent.")
-                    if (now-renewed>750_000_000 && control.tryLock()) try {
-                        val renew=request.copyOf(); NpBleProtocol.put(renew,8,4); NpBleProtocol.seal(renew)
+                    if (now-renewed>(if(multi)150_000_000 else 750_000_000) && control.tryLock()) try {
+                        val renew=receiver?.feedback(stalled=now-lastData>350_000_000) ?: request.copyOf().also { NpBleProtocol.put(it,8,4); NpBleProtocol.seal(it) }
                         if (!write(NpBleProtocol.frame(0xB9,renew))) throw IOException("Preview renewal failed; no control replayed.")
                         renewed=System.nanoTime()
                     } finally { control.unlock() }

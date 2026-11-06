@@ -1,10 +1,14 @@
 package com.wild.android.ble
 
-/** Native ADC counts only. The display is subsampled; no uV/LFP claim for NP2. */
+/** Wire decoders retain raw codes; published traces use midpoint-minus-raw counts once. */
 data class NpPreviewPoint(val tick: Long, val value: Double)
+data class NpPreviewSelection(val probe: Int = 1, val channel: Int = 0)
+data class NpPreviewTrace(val selection: NpPreviewSelection, val points: List<NpPreviewPoint> = emptyList())
 data class NpPreviewUi(val enabled: Boolean = false, val message: String = "Preview is off; it never starts acquisition.",
     val points: List<NpPreviewPoint> = emptyList(), val sampleHz: Double = 0.0, val bits: Int = 0, val gaps: Long = 0,
-    val probe: Int = 1, val channel: Int = 0, val band: Int = 0)
+    val probe: Int = 1, val channel: Int = 0, val band: Int = 0,
+    val traces: List<NpPreviewTrace> = emptyList(), val stride: Long = 0, val sourceHz: Int = 0,
+    val filtered: Boolean = false, val updatedAtMs: Long = 0)
 
 internal object NpBlePreview {
     fun request(version: Int, id: Long, kind: Int, probe: Int, channel: Int, phase: Int = 0, session: Long = 0, band: Int = 0): ByteArray {
@@ -51,16 +55,17 @@ internal object NpBlePreview {
             b.copyInto(data!!,offset,32,32+n); received += n
             return received == total
         }
-        fun phase(): Int {
+        fun phase(selectedProbe: Int = probe): Int {
             val bytes = requireNotNull(data); require(kind == 0 && received == bytes.size)
             if (version == 2) {
+                require(selectedProbe in 1..2)
                 val sync = intArrayOf(0xd3,0x6a,0x59,0xc5,0x3e,0xa7,0x1d,0xe4,0xb2,0x4f,0x78,0x96)
                 val phases = (0 until 1600).filter { phase ->
                     bytes.indices.all { i ->
                         val pos = ((first%1600).toInt()+phase+i)%1600; val tick = pos%100; val frame = pos/100
                         var expected = if (tick == 0 && frame == 0) 7 else 0
                         if (tick in 2..3) for (lane in 0..2) { val bit = frame*6+lane*2+tick-2; expected = expected or (((sync[bit/8] ushr (bit%8)) and 1) shl lane) }
-                        tick >= 4 || ((bytes[i].toInt() ushr ((probe-1)*3)) and 7) == expected
+                        tick >= 4 || ((bytes[i].toInt() ushr ((selectedProbe-1)*3)) and 7) == expected
                     }
                 }
                 require(phases.size == 1) { "No unique NP2 SuperSync framing; no waveform plotted." }; return phases.single()

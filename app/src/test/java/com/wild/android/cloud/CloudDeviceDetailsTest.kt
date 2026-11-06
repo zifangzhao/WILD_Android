@@ -32,4 +32,14 @@ class CloudDeviceDetailsTest {
         assertFalse(cloudDeviceDetails(changed).toString().contains("source-hash"))
         assertFalse(cloudDeviceDetails(changed).toString().contains("snapshot"))
     }
+    @Test fun highRateMultiDevicePreviewDoesNotChangeCloudFingerprintOrUploadSamples() {
+        val original=session()
+        val preview=com.wild.android.ble.NpPreviewUi(enabled=true,updatedAtMs=99999,sampleHz=500.0,
+            traces=listOf(com.wild.android.ble.NpPreviewTrace(com.wild.android.ble.NpPreviewSelection(1,383),
+                List(5000) {com.wild.android.ble.NpPreviewPoint(it.toLong(),123.456)})))
+        val changed=original.copy(neuropixels=original.neuropixels.copy(preview=preview))
+        assertEquals(cloudStatusFingerprint(listOf(original)),cloudStatusFingerprint(listOf(changed)))
+        assertEquals(cloudDeviceDetails(original),cloudDeviceDetails(changed))
+        assertFalse(cloudDeviceDetails(changed).toString().contains("123.456"))
+    }
 }

@@ -657,6 +657,7 @@ fun WildApp(
                             onSelectDevice = viewModel::setActiveSession,
                             onLink = { uiState.activeSession?.let { if (it.isConnected || it.isLinkingLike) viewModel.disconnect(it.id) else viewModel.connect(it.id) } },
                             onAction = viewModel::controlNeuropixels,
+                            initialPreview = true,
                         ) else PreviewScreen(
                             modifier = Modifier.fillMaxSize(),
                             uiState = uiState,
